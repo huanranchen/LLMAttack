@@ -19,7 +19,7 @@ class Llama2(BaseModel):
     ):
         model = AutoModelForCausalLM.from_pretrained(
             llama_2_path,
-            torch_dtype=torch.float16,
+            torch_dtype=torch.float32,
             trust_remote_code=True,
         ).eval()
         tokenizer = AutoTokenizer.from_pretrained(llama_2_path, trust_remote_code=True, use_fast=False)
@@ -59,7 +59,7 @@ class Llama2(BaseModel):
 class Llama3(Llama2):
     def __init__(
         self,
-        llama_3_path="/workspace/home/chenhuanran2022/.cache/huggingface/hub/models--meta-llama--Meta-Llama-3-8B/snapshots/62bd457b6fe961a42a631306577e622c83876cb6/",
+        llama_3_path="/workspace/home/chenhuanran2022/.cache/huggingface/hub/models--meta-llama--Meta-Llama-3-8B-Instruct/snapshots/c4a54320a52ed5f88b7a2f84496903ea4ff07b45/",
     ):
         model = AutoModelForCausalLM.from_pretrained(
             llama_3_path,
@@ -73,21 +73,21 @@ class Llama3(Llama2):
     def get_prompt(self, usr_prompt, adv_suffix, target) -> Tuple[Tensor, slice, slice, slice]:
         self.conv.messages.clear()
         self.conv.append_message(self.conv.roles[0], f"{usr_prompt}")
-        now_tokens = self.tokenizer(self.conv.get_prompt()).input_ids
+        now_tokens = self.tokenizer(self.conv.get_prompt(), add_special_tokens=False).input_ids
         usr_prompt_length = len(now_tokens)
 
         self.conv.update_last_message(f"{usr_prompt} {adv_suffix}")
-        now_tokens = self.tokenizer(self.conv.get_prompt()).input_ids
+        now_tokens = self.tokenizer(self.conv.get_prompt(), add_special_tokens=False).input_ids
         total_prompt_length = len(now_tokens)
         # To remove \n ### and space.
         grad_slice = slice(usr_prompt_length - 2, total_prompt_length - 3)
 
         self.conv.append_message(self.conv.roles[1], "")
-        now_tokens = self.tokenizer(self.conv.get_prompt()).input_ids
+        now_tokens = self.tokenizer(self.conv.get_prompt(), add_special_tokens=False).input_ids
         target_slice_left = len(now_tokens) + 1 - 1
 
         self.conv.update_last_message(f"{target}")
-        now_tokens = self.tokenizer(self.conv.get_prompt()).input_ids
+        now_tokens = self.tokenizer(self.conv.get_prompt(), add_special_tokens=False).input_ids
         target_slice_right = len(now_tokens) - 1 - 1 - 1  # no last token
         target_slice = slice(target_slice_left, target_slice_right)  # for output logits
         loss_slice = slice(target_slice_left - 1, target_slice_right - 1)

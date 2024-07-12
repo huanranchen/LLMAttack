@@ -10,7 +10,6 @@ from transformers import (
 )
 from torch import nn
 import numpy as np
-import gc
 
 
 def get_embedding_matrix(model):
@@ -95,7 +94,9 @@ def get_filtered_cands(tokenizer, control_cand, filter_cand=True, curr_control=N
     return cands
 
 
-def get_logits(*, model, tokenizer, input_ids, control_slice, test_controls=None, return_ids=False, batch_size=512):
+def get_losses(
+    *, model, tokenizer, input_ids, control_slice, target_slice, test_controls=None, return_ids=False, batch_size=512
+):
     if isinstance(test_controls[0], str):
         max_len = control_slice.stop - control_slice.start
         test_ids = [
@@ -126,22 +127,15 @@ def get_logits(*, model, tokenizer, input_ids, control_slice, test_controls=None
     else:
         attn_mask = None
 
-    if return_ids:
-        del locs, test_ids
-        gc.collect()
-        logits = forward(model=model, input_ids=ids, attention_mask=attn_mask, batch_size=batch_size)
-        return logits, ids
-    else:
-        del locs, test_ids
-        logits = forward(model=model, input_ids=ids, attention_mask=attn_mask, batch_size=batch_size)
-        del ids
-        gc.collect()
-        return logits
+    losses = batch_calculate_loss(
+        model=model, input_ids=ids, attention_mask=attn_mask, batch_size=batch_size, target_slice=target_slice
+    )
+    return losses
 
 
 @torch.no_grad()
-def forward(*, model, input_ids, attention_mask, batch_size=512):
-    logits = []
+def batch_calculate_loss(*, model, input_ids, attention_mask, target_slice, batch_size=512):
+    losses = []
     for i in range(0, input_ids.shape[0], batch_size):
         batch_input_ids = input_ids[i : i + batch_size]
         if attention_mask is not None:
@@ -150,14 +144,9 @@ def forward(*, model, input_ids, attention_mask, batch_size=512):
             batch_attention_mask = None
         outputs = model(input_ids=batch_input_ids, attention_mask=batch_attention_mask)
         logit = outputs.logits
-        logits.append(logit.clone().cpu())
-        del outputs
-        torch.cuda.empty_cache()
-        gc.collect()
+        losses.append(target_loss(logit, batch_input_ids, target_slice))
 
-    del batch_input_ids, batch_attention_mask
-
-    return torch.cat(logits, dim=0)
+    return torch.cat(losses, dim=0)
 
 
 def target_loss(logits, ids, target_slice):
@@ -177,6 +166,7 @@ class GCGAttack(BaseAttacker):
         batch_size=512,
         topk=256,
         device=torch.device("cuda" if torch.cuda.is_available() else "cpu"),
+        verbose=False,
     ):
         super().__init__(models)
         self.num_steps = num_steps
@@ -185,6 +175,7 @@ class GCGAttack(BaseAttacker):
         self.batch_size = batch_size
         self.topk = topk
         self.device = device
+        self.verbose = verbose
 
     @torch.no_grad()
     def enumerate_best_token(self, input_ids, adv_suffix, target_slice, grad_slice, coordinate_grad, not_allowed_tokens):
@@ -206,11 +197,11 @@ class GCGAttack(BaseAttacker):
         # so Encode(Decode(tokens)) may produce a different tokenization.
         # We ensure the number of token remains to prevent the memory keeps growing and run into OOM.
         new_adv_suffix = get_filtered_cands(
-            model.tokenizer, new_adv_suffix_toks, filter_cand=True, curr_control=adv_suffix
+            model.tokenizer, new_adv_suffix_toks, filter_cand=False, curr_control=adv_suffix
         )
 
         # Step 3.4 Compute loss on these candidates and take the argmin.
-        logits, ids = get_logits(
+        losses = get_losses(
             model=model,
             tokenizer=model.tokenizer,
             input_ids=input_ids,
@@ -219,41 +210,53 @@ class GCGAttack(BaseAttacker):
             return_ids=True,
             # batch_size=512,
             batch_size=64,
+            target_slice=target_slice,
         )  # decrease this number if you run into OOM.
-        losses = target_loss(logits.cpu(), ids.cpu(), target_slice)
 
         best_new_adv_suffix_id = losses.argmin()
         best_new_adv_suffix = new_adv_suffix[best_new_adv_suffix_id]
 
         current_loss = losses[best_new_adv_suffix_id]
-        print(current_loss)
         # Update the running adv_suffix with the best candidate
         adv_suffix = best_new_adv_suffix
-        return adv_suffix
+        return adv_suffix, current_loss.item()
 
     def attack(self, adv_string_init="! ! ! ! ! ! ! ! ! ! ! ! ! ! ! ! ! ! ! !"):
         model = self.models[0]
         not_allowed_tokens = get_nonascii_toks(model.tokenizer)
         adv_suffix = adv_string_init
+        loss = 0
         for step in range(1, self.num_steps + 1):
             input_ids, grad_slice, target_slice, loss_slice = model.get_prompt(self.prompt, adv_suffix, self.target)
-            # print(input_ids.shape, len(model.tokenizer.encode(adv_suffix)), adv_suffix, "\n", model.tokenizer.decode(input_ids))
-            print(
-                input_ids.shape,
-                len(model.tokenizer.encode(adv_suffix)),
-                "\n",
-                adv_suffix,
-                "\n",
-                model.tokenizer.encode(adv_suffix),
-            )
+            # print(
+            #     "-" * 50,
+            #     "\n",
+            #     model.tokenizer.decode(input_ids[grad_slice]),
+            #     "\n",
+            #     model.tokenizer.decode(input_ids[target_slice]),
+            #     "\n",
+            #     model.tokenizer.decode(input_ids[loss_slice]),
+            #     "\n",
+            #     "-" * 50,
+            # )
+            if self.verbose:
+                print(
+                    input_ids.numel(),
+                    len(model.tokenizer.encode(adv_suffix, add_special_tokens=False)),
+                    "\n" + adv_suffix + "\n",
+                    model.tokenizer.encode(adv_suffix, add_special_tokens=False),
+                )
+                print(loss)
             # Step 2. Compute Coordinate Gradient
             coordinate_grad = self.token_gradients(input_ids, grad_slice, target_slice, loss_slice)
 
             # Step 3. Sample a batch of new tokens based on the coordinate gradient.
             # Notice that we only need the one that minimizes the loss.
-            adv_suffix = self.enumerate_best_token(
+            adv_suffix, loss = self.enumerate_best_token(
                 input_ids, adv_suffix, target_slice, grad_slice, coordinate_grad, not_allowed_tokens
             )
+            if loss < 0.1:
+                return adv_suffix
 
         return adv_suffix
 
