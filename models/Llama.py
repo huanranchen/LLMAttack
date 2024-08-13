@@ -12,15 +12,11 @@ __all__ = ["Llama2", "Llama3"]
 class Llama2(BaseModel):
     def __init__(
         self,
-        llama_2_path=(
-            "/workspace/home/chenhuanran2022/.cache/huggingface/hub/"
-            "models--meta-llama--Llama-2-7b-chat-hf/snapshots/c1b0db933684edbfe29a06fa47eb19cc48025e93/"
-        ),
+        llama_2_path="meta-llama/Llama-2-7b-chat-hf",
+        dtype=torch.float32,
     ):
         model = AutoModelForCausalLM.from_pretrained(
-            llama_2_path,
-            torch_dtype=torch.float32,
-            trust_remote_code=True,
+            llama_2_path, torch_dtype=dtype, trust_remote_code=True, use_auth_token=True
         ).eval()
         tokenizer = AutoTokenizer.from_pretrained(llama_2_path, trust_remote_code=True, use_fast=False)
         conv = get_conversation_template("llama-2")
@@ -40,9 +36,11 @@ class Llama2(BaseModel):
         usr_prompt_length = len(now_tokens)  # since apparition token
 
         self.conv.update_last_message(f"{usr_prompt} {adv_suffix}")
+        # self.conv.get_prompt()这玩意会往最后加个空格，导致出现29871多一个
+        # 但是concatenation又是我们手动自己做的，导致下一次做的时候没有这个空格，因此产生错位
         now_tokens = self.tokenizer(self.conv.get_prompt()).input_ids
-        total_prompt_length = len(now_tokens)  # since apparition token
-        grad_slice = slice(usr_prompt_length, total_prompt_length)
+        total_prompt_length = len(now_tokens)
+        grad_slice = slice(usr_prompt_length - 1, total_prompt_length - 1)
 
         self.conv.append_message(self.conv.roles[1], "")
         now_tokens = self.tokenizer(self.conv.get_prompt()).input_ids
@@ -53,6 +51,7 @@ class Llama2(BaseModel):
         target_slice_right = len(now_tokens) - 1 - 1 - 1  # no last token
         target_slice = slice(target_slice_left, target_slice_right)  # for output logits
         loss_slice = slice(target_slice_left - 1, target_slice_right - 1)
+
         return torch.tensor(now_tokens, device=self.device), grad_slice, target_slice, loss_slice
 
 

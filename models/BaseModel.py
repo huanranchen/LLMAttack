@@ -52,16 +52,20 @@ class BaseModel(nn.Module):
         loss_slice = slice(target_slice_left - 1, target_slice_right - 1)
         return torch.tensor(now_tokens, device=self.device), grad_slice, target_slice, loss_slice
 
-    def generate(self, question: str, max_length=300) -> str:
+    def generate(self, question: str, max_length=300, verbose=False) -> str:
         """
         Given input string, generate the following tokens in chat mode. Will use fastchat conversation template
-        :param question:
-        :param max_length:
-        :return:
         """
         input_ids, grad_slice, target_slice, loss_slice = self.get_prompt(question, "", "")
-        print("actual input is: ", self.tokenizer.decode(input_ids))
-        ids = self.model.generate(input_ids.unsqueeze(0), max_length=max_length, do_sample=False)[0]
+        if verbose:
+            print("actual input is: ", self.tokenizer.decode(input_ids))
+        ids = self.model.generate(
+            input_ids.unsqueeze(0),
+            max_length=max_length,
+            do_sample=False,
+            temperature=None,
+            top_p=None,
+        )[0]
         answer = self.tokenizer.decode(ids[input_ids.numel() :])
         return answer
 

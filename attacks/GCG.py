@@ -12,6 +12,9 @@ from torch import nn
 import numpy as np
 
 
+__all__ = ["GCGAttack", "MomentumGCG"]
+
+
 def get_embedding_matrix(model):
     if isinstance(model, GPTJForCausalLM) or isinstance(model, GPT2LMHeadModel):
         return model.transformer.wte.weight
@@ -42,15 +45,33 @@ def sample_control(control_toks, grad, batch_size, topk=256, temp=1, not_allowed
     control_toks = control_toks.to(grad.device)  # L
 
     original_control_toks = control_toks.repeat(batch_size, 1)  # B, L
-    new_token_pos = torch.arange(0, len(control_toks), len(control_toks) / batch_size, device=grad.device).to(
-        torch.int64
-    )  # B
+    new_token_pos = torch.arange(0, len(control_toks), len(control_toks) / batch_size, device=grad.device).to(torch.long)
     new_token_val = torch.gather(
         top_indices[new_token_pos], 1, torch.randint(0, topk, (batch_size, 1), device=grad.device)
     )  # B, 1
-    new_control_toks = original_control_toks.scatter_(1, new_token_pos.unsqueeze(-1), new_token_val)
+    new_control_toks = original_control_toks.scatter_(1, new_token_pos.unsqueeze(-1), new_token_val)  # B, L
 
     return new_control_toks
+
+
+def sample_control_beam(control_toks, grad, batch_size, topk=32, temp=1, not_allowed_tokens=None):
+    """
+    我们有 (L, K)个向量，要从中选B个句子，得到(B, L)
+    """
+    if not_allowed_tokens is not None:
+        grad[:, not_allowed_tokens.to(grad.device)] = np.infty
+
+    top_indices = (-grad).topk(topk, dim=1).indices  # L, K
+    L = top_indices.shape[0]
+
+    repeated_top_indices = top_indices.unsqueeze(0).repeat(batch_size, 1, 1)  # B, L, K
+    selected_indices = torch.randint(0, topk, (batch_size, L), device=grad.device).unsqueeze(2)  # B, L, 1
+    selected_indices = torch.gather(repeated_top_indices, 2, selected_indices).squeeze()  # B, L
+
+    # 把原来的也concate进来，这样就能保证优化过程是strictly descent。
+    selected_indices = torch.cat([control_toks[None, :], selected_indices], dim=0)  # (B+1, L)
+    # TODO: idea，把原来的indices也纳入到topk中，从而增大选到原来token的概率（也可以repeat n次后再放进去）
+    return selected_indices
 
 
 def get_nonascii_toks(tokenizer, device="cpu"):
@@ -168,14 +189,12 @@ class GCGAttack(BaseAttacker):
         device=torch.device("cuda" if torch.cuda.is_available() else "cpu"),
         verbose=False,
     ):
-        super().__init__(models)
+        super(GCGAttack, self).__init__(models, prompt, verbose)
         self.num_steps = num_steps
-        self.prompt = prompt
         self.target = target
         self.batch_size = batch_size
         self.topk = topk
         self.device = device
-        self.verbose = verbose
 
     @torch.no_grad()
     def enumerate_best_token(self, input_ids, adv_suffix, target_slice, grad_slice, coordinate_grad, not_allowed_tokens):
@@ -228,34 +247,19 @@ class GCGAttack(BaseAttacker):
         loss = 0
         for step in range(1, self.num_steps + 1):
             input_ids, grad_slice, target_slice, loss_slice = model.get_prompt(self.prompt, adv_suffix, self.target)
-            # print(
-            #     "-" * 50,
-            #     "\n",
-            #     model.tokenizer.decode(input_ids[grad_slice]),
-            #     "\n",
-            #     model.tokenizer.decode(input_ids[target_slice]),
-            #     "\n",
-            #     model.tokenizer.decode(input_ids[loss_slice]),
-            #     "\n",
-            #     "-" * 50,
-            # )
             if self.verbose:
-                print(
-                    input_ids.numel(),
-                    len(model.tokenizer.encode(adv_suffix, add_special_tokens=False)),
-                    "\n" + adv_suffix + "\n",
-                    model.tokenizer.encode(adv_suffix, add_special_tokens=False),
-                )
-                print(loss)
+                self.verbose_info(step, loss, adv_suffix, input_ids, grad_slice, target_slice, loss_slice)
+
             # Step 2. Compute Coordinate Gradient
             coordinate_grad = self.token_gradients(input_ids, grad_slice, target_slice, loss_slice)
-
+            # coordinate_grad.zero_()
+            # grad_slice = slice(grad_slice.start + 1, grad_slice.stop + 1)
             # Step 3. Sample a batch of new tokens based on the coordinate gradient.
             # Notice that we only need the one that minimizes the loss.
             adv_suffix, loss = self.enumerate_best_token(
                 input_ids, adv_suffix, target_slice, grad_slice, coordinate_grad, not_allowed_tokens
             )
-            if loss < 0.1:
+            if step % 10 == 0 and self.check_success(adv_suffix):
                 return adv_suffix
 
         return adv_suffix
@@ -302,10 +306,49 @@ class GCGAttack(BaseAttacker):
         logits = model(inputs_embeds=full_embeds).logits
         targets = input_ids[target_slice]
         loss = nn.CrossEntropyLoss()(logits[0, loss_slice, :], targets)
-
         loss.backward()
 
         grad = one_hot.grad.clone()
         grad = grad / grad.norm(dim=-1, keepdim=True)
-
         return grad
+
+    def verbose_info(self, step, loss, adv_suffix, input_ids, grad_slice, target_slice, loss_slice):
+        model = self.models[0]
+        print(step, loss)
+        print(len(model.tokenizer.encode(adv_suffix, add_special_tokens=False)), adv_suffix)
+        print(len(input_ids[grad_slice]), model.tokenizer.decode(input_ids[grad_slice]))
+        print(len(input_ids[target_slice]), model.tokenizer.decode(input_ids[target_slice]))
+        print(len(input_ids[loss_slice]), model.tokenizer.decode(input_ids[loss_slice]))
+        print(len(input_ids), model.tokenizer.decode(input_ids))
+        print(grad_slice, target_slice, loss_slice)
+        print("-" * 100)
+
+
+class MomentumGCG(GCGAttack):
+    def __init__(self, *args, mu=1, **kwargs):
+        super(MomentumGCG, self).__init__(*args, **kwargs)
+        self.mu = mu
+
+    def attack(self, adv_string_init="! ! ! ! ! ! ! ! ! ! ! ! ! ! ! ! ! ! ! !"):
+        model = self.models[0]
+        not_allowed_tokens = get_nonascii_toks(model.tokenizer)
+        adv_suffix = adv_string_init
+        loss = 0
+        momentum = 0
+        for step in range(1, self.num_steps + 1):
+            input_ids, grad_slice, target_slice, loss_slice = model.get_prompt(self.prompt, adv_suffix, self.target)
+            if self.verbose:
+                self.verbose_info(step, loss, adv_suffix, input_ids, grad_slice, target_slice, loss_slice)
+
+            # Step 2. Compute Coordinate Gradient
+            coordinate_grad = self.token_gradients(input_ids, grad_slice, target_slice, loss_slice)
+            momentum = momentum * self.mu + coordinate_grad
+            # Step 3. Sample a batch of new tokens based on the coordinate gradient.
+            # Notice that we only need the one that minimizes the loss.
+            adv_suffix, loss = self.enumerate_best_token(
+                input_ids, adv_suffix, target_slice, grad_slice, momentum, not_allowed_tokens
+            )
+            if loss < 0.1:
+                return adv_suffix
+
+        return adv_suffix
