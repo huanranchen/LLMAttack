@@ -52,22 +52,28 @@ class BaseModel(nn.Module):
         loss_slice = slice(target_slice_left - 1, target_slice_right - 1)
         return torch.tensor(now_tokens, device=self.device), grad_slice, target_slice, loss_slice
 
-    def generate(self, question: str, max_length=300, verbose=False) -> str:
+    def generate(self, question: str, max_length=300, verbose=False, return_logits=False) -> str or Tuple[str, Tensor]:
         """
         Given input string, generate the following tokens in chat mode. Will use fastchat conversation template
         """
         input_ids, grad_slice, target_slice, loss_slice = self.get_prompt(question, "", "")
         if verbose:
             print("actual input is: ", self.tokenizer.decode(input_ids))
-        ids = self.model.generate(
+        outputs = self.model.generate(
             input_ids.unsqueeze(0),
             max_length=max_length,
             do_sample=False,
             temperature=None,
             top_p=None,
-        )[0]
+            output_logits=True,
+            return_dict_in_generate=True,
+        )
+        ids = outputs.sequences.squeeze()
+        logits = torch.cat(outputs.logits, dim=0)
         answer = self.tokenizer.decode(ids[input_ids.numel() :])
-        return answer
+        # llama3等模型的logits实际上已经被shift过了。llama2和vicuna没有shift，因此要手动shift
+        logits = logits if logits.shape[0] == (ids.numel() - input_ids.numel()) else logits[input_ids.numel() :]
+        return answer if not return_logits else (answer, logits)
 
     def generate_by_next_token_prediction(self, inputs: str, max_length=300) -> str:
         """

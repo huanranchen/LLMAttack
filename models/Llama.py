@@ -58,11 +58,12 @@ class Llama2(BaseModel):
 class Llama3(Llama2):
     def __init__(
         self,
-        llama_3_path="/workspace/home/chenhuanran2022/.cache/huggingface/hub/models--meta-llama--Meta-Llama-3-8B-Instruct/snapshots/c4a54320a52ed5f88b7a2f84496903ea4ff07b45/",
+        llama_3_path="meta-llama/Meta-Llama-3-8B-Instruct",
+        dtype=torch.float32,
     ):
         model = AutoModelForCausalLM.from_pretrained(
             llama_3_path,
-            torch_dtype=torch.float16,
+            torch_dtype=dtype,
             trust_remote_code=True,
         ).eval()
         tokenizer = AutoTokenizer.from_pretrained(llama_3_path, trust_remote_code=True, use_fast=False)

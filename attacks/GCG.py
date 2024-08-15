@@ -189,9 +189,8 @@ class GCGAttack(BaseAttacker):
         device=torch.device("cuda" if torch.cuda.is_available() else "cpu"),
         verbose=False,
     ):
-        super(GCGAttack, self).__init__(models, prompt, verbose)
+        super(GCGAttack, self).__init__(models, prompt, target, verbose)
         self.num_steps = num_steps
-        self.target = target
         self.batch_size = batch_size
         self.topk = topk
         self.device = device
@@ -227,8 +226,7 @@ class GCGAttack(BaseAttacker):
             control_slice=grad_slice,
             test_controls=new_adv_suffix,
             return_ids=True,
-            # batch_size=512,
-            batch_size=64,
+            batch_size=64,  # this can be arbitrarily increase without hurting performance
             target_slice=target_slice,
         )  # decrease this number if you run into OOM.
 
@@ -247,19 +245,18 @@ class GCGAttack(BaseAttacker):
         loss = 0
         for step in range(1, self.num_steps + 1):
             input_ids, grad_slice, target_slice, loss_slice = model.get_prompt(self.prompt, adv_suffix, self.target)
-            if self.verbose:
-                self.verbose_info(step, loss, adv_suffix, input_ids, grad_slice, target_slice, loss_slice)
 
             # Step 2. Compute Coordinate Gradient
-            coordinate_grad = self.token_gradients(input_ids, grad_slice, target_slice, loss_slice)
-            # coordinate_grad.zero_()
+            coordinate_grad, topk = self.token_gradients(input_ids, grad_slice, target_slice, loss_slice)
+            if self.verbose:
+                self.verbose_info(step, loss, adv_suffix, input_ids, grad_slice, target_slice, loss_slice, topk)
             # grad_slice = slice(grad_slice.start + 1, grad_slice.stop + 1)
             # Step 3. Sample a batch of new tokens based on the coordinate gradient.
             # Notice that we only need the one that minimizes the loss.
             adv_suffix, loss = self.enumerate_best_token(
                 input_ids, adv_suffix, target_slice, grad_slice, coordinate_grad, not_allowed_tokens
             )
-            if step % 10 == 0 and self.check_success(adv_suffix):
+            if (loss < 0.5 or step % 10 == 0) and self.check_success(adv_suffix, input_ids[target_slice]):
                 return adv_suffix
 
         return adv_suffix
@@ -310,9 +307,17 @@ class GCGAttack(BaseAttacker):
 
         grad = one_hot.grad.clone()
         grad = grad / grad.norm(dim=-1, keepdim=True)
-        return grad
 
-    def verbose_info(self, step, loss, adv_suffix, input_ids, grad_slice, target_slice, loss_slice):
+        # Compute topk
+        prediction = torch.topk(logits[0, loss_slice, :], k=10, dim=1)[1]  # L, K
+        position_table = prediction == targets.unsqueeze(1)
+        topk = torch.max(position_table, dim=1)[1]
+        topk = torch.where(position_table.sum(1) != 0, topk, float("inf"))
+        # 可以打印position_table这个表来check consistency，挺有用的
+        # print(position_table)
+        return grad, topk
+
+    def verbose_info(self, step, loss, adv_suffix, input_ids, grad_slice, target_slice, loss_slice, topk):
         model = self.models[0]
         print(step, loss)
         print(len(model.tokenizer.encode(adv_suffix, add_special_tokens=False)), adv_suffix)
@@ -321,6 +326,9 @@ class GCGAttack(BaseAttacker):
         print(len(input_ids[loss_slice]), model.tokenizer.decode(input_ids[loss_slice]))
         print(len(input_ids), model.tokenizer.decode(input_ids))
         print(grad_slice, target_slice, loss_slice)
+
+        # 打印各个token是top几
+        print("Target positions: ", topk)
         print("-" * 100)
 
 
@@ -341,14 +349,14 @@ class MomentumGCG(GCGAttack):
                 self.verbose_info(step, loss, adv_suffix, input_ids, grad_slice, target_slice, loss_slice)
 
             # Step 2. Compute Coordinate Gradient
-            coordinate_grad = self.token_gradients(input_ids, grad_slice, target_slice, loss_slice)
+            coordinate_grad, topk = self.token_gradients(input_ids, grad_slice, target_slice, loss_slice)
             momentum = momentum * self.mu + coordinate_grad
             # Step 3. Sample a batch of new tokens based on the coordinate gradient.
             # Notice that we only need the one that minimizes the loss.
             adv_suffix, loss = self.enumerate_best_token(
                 input_ids, adv_suffix, target_slice, grad_slice, momentum, not_allowed_tokens
             )
-            if loss < 0.1:
+            if (loss < 0.5 or step % 10 == 0) and self.check_success(adv_suffix, input_ids[target_slice]):
                 return adv_suffix
 
         return adv_suffix
