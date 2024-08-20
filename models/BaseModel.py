@@ -60,7 +60,7 @@ class BaseModel(nn.Module):
         if verbose:
             print("actual input is: ", self.tokenizer.decode(input_ids))
         outputs = self.model.generate(
-            input_ids.unsqueeze(0),
+            input_ids.unsqueeze(0),  # 1, L
             max_length=max_length,
             do_sample=False,
             temperature=None,

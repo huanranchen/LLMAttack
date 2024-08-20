@@ -151,7 +151,7 @@ class Uniform(Graph):
         epow = (-dsigma).exp()[..., None]
         return ((epow - 1) / (dim * epow)) * score.sum(dim=-1, keepdim=True) + score / epow
 
-    def sample_limit(self, *batch_dims):
+    def sample_limit(self, batch_dims):
         return torch.randint(0, self.dim, batch_dims)
 
     def score_entropy(self, score, sigma, x, x0):
@@ -199,6 +199,9 @@ class Absorbing(Graph):
     def transp_rate(self, i):
         edge = -F.one_hot(i, num_classes=self.dim)
         edge[i == self.dim - 1] += 1
+        # 这个我也觉得奇怪。为什么最后一行没有mask？做实验试试？ 可能因为absorbing markov chain本身不是可逆的？现在这样mask一旦变成词就再也不会恢复了..
+        # 因此，焕然加了：extra one. Added by Huanran. Please note this modification.
+        edge[:, :, self.dim - 1] += 1
         return edge
 
     def transition(self, i, sigma):

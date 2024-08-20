@@ -1,1 +1,1 @@
-from .AdvBench import get_adv_bench_behaviors
+from .AdvBench import get_adv_bench_behaviors, get_adv_bench_behaviors_50

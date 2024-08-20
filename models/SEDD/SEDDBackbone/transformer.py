@@ -247,16 +247,12 @@ class SEDD(nn.Module, PyTorchModelHubMixin):
         c = F.silu(self.sigma_map(sigma))
 
         rotary_cos_sin = self.rotary_emb(x)
-        #
+
         with torch.cuda.amp.autocast(dtype=torch.bfloat16):
             for i in range(len(self.blocks)):
                 x = self.blocks[i](x, rotary_cos_sin, c, seqlens=None)
 
             x = self.output_layer(x, c)
-        # for i in range(len(self.blocks)):
-        #     x = self.blocks[i](x, rotary_cos_sin, c, seqlens=None)
-        #
-        # x = self.output_layer(x, c)
 
         if self.scale_by_sigma:
             assert self.absorb, "Haven't configured this to work."
