@@ -1,7 +1,5 @@
 import torch
-import pdb
 from models.SEDD import SEDD, EulerSEDDSampler, LogLinearNoise, Absorbing, Uniform
-from transformers import GPT2TokenizerFast
 import yaml
 
 config_path = "./resources/checkpoints/SEDD/uniform_small/095409/.hydra/config.yaml"
@@ -22,7 +20,5 @@ for k, v in ckpt_meta.items():
     resulted_ckpt[k] = v
 
 
-# print(resulted_ckpt.keys())
 transformer.load_state_dict(resulted_ckpt)
 transformer.save_pretrained("./resources/checkpoints/SEDD/uniform_small/huanran_repaired/")
-transformer.push_to_hub("HuanranChen/SEDD-uniform-repaired")

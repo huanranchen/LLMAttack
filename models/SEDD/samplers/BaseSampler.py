@@ -8,13 +8,20 @@ from transformers import PreTrainedTokenizer
 
 class BaseSEDDSampler:
     def __init__(
-        self, model: nn.Module, tokenizer: PreTrainedTokenizer, noise: Noise, graph: Graph, device=torch.device("cuda")
+        self,
+        model: nn.Module,
+        tokenizer: PreTrainedTokenizer,
+        noise: Noise,
+        graph: Graph,
+        verbose: bool = False,
+        device=torch.device("cuda"),
     ):
         self.model = model.to(device).requires_grad_(False).eval()
         self.device = device
         self.noise = noise
         self.graph = graph
         self.tokenizer = tokenizer
+        self.verbose = verbose
 
     @abstractmethod
     def sample(self, *args, **kwargs):

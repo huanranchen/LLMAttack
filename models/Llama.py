@@ -13,7 +13,7 @@ class Llama2(BaseModel):
     def __init__(
         self,
         llama_2_path="meta-llama/Llama-2-7b-chat-hf",
-        dtype=torch.float32,
+        dtype=torch.float16,
     ):
         model = AutoModelForCausalLM.from_pretrained(
             llama_2_path, torch_dtype=dtype, trust_remote_code=True, use_auth_token=True
@@ -96,7 +96,5 @@ class Llama3(Llama2):
         target_slice_right = len(now_tokens) - 1 - 1 - 1  # no last token
         target_slice = slice(target_slice_left, target_slice_right)  # for output logits
         loss_slice = slice(target_slice_left - 1, target_slice_right - 1)
-        # import pdb
-        #
-        # pdb.set_trace()
+
         return torch.tensor(now_tokens, device=self.device), grad_slice, target_slice, loss_slice

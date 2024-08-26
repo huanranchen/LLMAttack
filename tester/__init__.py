@@ -1,2 +1,2 @@
-from .AttackSuccessRate import test_harmful_output_rate
+from .AttackSuccessRate import *
 from .init import forbid_initialization
