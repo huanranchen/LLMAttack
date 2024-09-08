@@ -2,7 +2,7 @@ import torch
 from models import BaseModel
 from attacks import BaseAttacker
 from tqdm import tqdm
-from typing import Iterable, List, Callable, Any
+from typing import Iterable, List, Callable, Any, Dict, Tuple
 
 
 __all__ = ["test_harmful_output_rate", "test_harmful_output_rate_with_warm_start"]
@@ -27,8 +27,8 @@ def test_harmful_output_rate(
     test_models: List[BaseModel or Callable or object],
     adv_string_init="[ " * 20,
     verbose=False,
-) -> List[List[float]]:
-    jailbrokens = [[] for _ in range(len(test_models))]
+) -> Dict[str, List[Dict]]:
+    results = {test_model.__class__: list() for test_model in test_models}
     for prompt, target in tqdm(loader):
         attacker.prompt = prompt
         attacker.target = target
@@ -41,14 +41,14 @@ def test_harmful_output_rate(
                 print(f"model {model.__class__} outputs: {out}")
                 print(f"is jailbroken: {jailbroken}")
                 print("-" * 20)
-            jailbrokens[i].append(jailbroken)
+            results[model.__class__].append(dict(input=prompt, output=out, jailbroken=jailbroken, adv_string=adv_string))
 
     # counting attack success rate
     for i, model in enumerate(test_models):
-        print(
-            f"model {model.__class__}, jailbrokens: {jailbrokens[i]}, total: {len(jailbrokens[i])}, ratio: {sum(jailbrokens[i]) / len(jailbrokens[i])}"
-        )
-    return jailbrokens
+        model_info = results[model.__class__]
+        jailbrokens, total = sum([i["jailbroken"] for i in model_info]), len(model_info)
+        print(f"model {model.__class__}, jailbrokens: {jailbrokens}, total: {total}, ratio: {jailbrokens/total}")
+    return results
 
 
 def test_harmful_output_rate_with_warm_start(

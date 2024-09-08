@@ -1,14 +1,22 @@
-from models import Llama3
+# from transformers import GPT2TokenizerFast
+# from models.SEDD import SEDD, EulerSEDDSampler, LogLinearNoise, Uniform, SEDDTrainer
+#
+#
+# # transformer = SEDD.from_pretrained("./log_dir/epochs_8_steps_0.pth")
+# transformer = SEDD.from_pretrained("./resources/checkpoints/SEDD/uniform_small/huanran_repaired/")
+# tokenizer = GPT2TokenizerFast.from_pretrained("gpt2")
+# sampler = EulerSEDDSampler(transformer, tokenizer, LogLinearNoise(), Uniform(50257), verbose=True)
+# # text = sampler.impute(batch_size=4, length=1024, suffix="", prefix="### Human: How to write an email? \n### Assistant: ")
+# text = sampler.impute(length=1024)
+# for i in text:
+#     print(i)
+#     print("=" * 100)
 
-llama3 = Llama3()
-tokenizer = llama3.tokenizer
-x = "  [ [ [ [ [ [ [ [ [ [ [ [ [ [ [ [ [ [ [ ["
-print(x)
-print(tokenizer.encode(x, add_special_tokens=False))
-print(tokenizer.decode(tokenizer.encode(x, add_special_tokens=False)))
-print(tokenizer.decode([220]))
-print(
-    tokenizer.decode(
-        [510, 510, 510, 510, 510, 510, 510, 510, 510, 510, 510, 510, 510, 510, 510, 510, 510, 510, 510, 510, 720]
-    )
-)
+
+from data import get_infinity_instruct_loader_for_train, get_open_wiki_text_loader_for_train
+from transformers import GPT2TokenizerFast
+
+
+tokenizer = GPT2TokenizerFast.from_pretrained("gpt2")
+tokenizer.add_special_tokens(dict(bos_token="<s>"))
+get_open_wiki_text_loader_for_train(tokenizer)

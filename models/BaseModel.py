@@ -11,14 +11,16 @@ class BaseModel(nn.Module):
         model: PreTrainedModel,
         tokenizer: PreTrainedTokenizer,
         conv: Conversation,
+        generation_max_length: int = 300,
         device=torch.device("cuda"),
     ):
         super(BaseModel, self).__init__()
-        self.model = model
+        self.model = model.to(device)
         self.tokenizer = tokenizer
         self.conv = conv
         self.eval().requires_grad_(False).to(device)
         self.device = device
+        self.generation_max_length = generation_max_length
 
     def forward(self, *args, **kwargs):
         return self.model(*args, **kwargs)
@@ -52,7 +54,7 @@ class BaseModel(nn.Module):
         loss_slice = slice(target_slice_left - 1, target_slice_right - 1)
         return torch.tensor(now_tokens, device=self.device), grad_slice, target_slice, loss_slice
 
-    def generate(self, question: str, max_length=300, verbose=False, return_logits=False) -> str or Tuple[str, Tensor]:
+    def generate(self, question: str, max_length=None, verbose=False, return_logits=False) -> str or Tuple[str, Tensor]:
         """
         Given input string, generate the following tokens in chat mode. Will use fastchat conversation template
         """
@@ -61,7 +63,7 @@ class BaseModel(nn.Module):
             print("actual input is: ", self.tokenizer.decode(input_ids))
         outputs = self.model.generate(
             input_ids.unsqueeze(0),  # 1, L
-            max_length=max_length,
+            max_length=self.generation_max_length if max_length is None else max_length,
             do_sample=False,
             temperature=None,
             top_p=None,

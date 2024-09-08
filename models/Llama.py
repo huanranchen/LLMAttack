@@ -10,17 +10,13 @@ __all__ = ["Llama2", "Llama3"]
 
 
 class Llama2(BaseModel):
-    def __init__(
-        self,
-        llama_2_path="meta-llama/Llama-2-7b-chat-hf",
-        dtype=torch.float16,
-    ):
+    def __init__(self, llama_2_path="meta-llama/Llama-2-7b-chat-hf", dtype=torch.float16, *args, **kwargs):
         model = AutoModelForCausalLM.from_pretrained(
             llama_2_path, torch_dtype=dtype, trust_remote_code=True, use_auth_token=True
         ).eval()
         tokenizer = AutoTokenizer.from_pretrained(llama_2_path, trust_remote_code=True, use_fast=False)
         conv = get_conversation_template("llama-2")
-        super(Llama2, self).__init__(model, tokenizer, conv)
+        super(Llama2, self).__init__(model, tokenizer, conv, *args, **kwargs)
 
     def get_prompt(self, usr_prompt, adv_suffix, target) -> Tuple[Tensor, slice, slice, slice]:
         """
