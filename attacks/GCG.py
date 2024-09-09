@@ -260,7 +260,7 @@ class GCGAttack(BaseAttacker):
             # Step 4. Check Success
             if (loss < 0.5 or step % 10 == 0) and self.check_success(adv_suffix, input_ids[target_slice]):
                 return adv_suffix
-        return adv_suffix
+        return self.prompt + " " + adv_suffix
 
     def token_gradients(self, input_ids, input_slice, target_slice, loss_slice):
         """

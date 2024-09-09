@@ -93,7 +93,7 @@ class ReParamAttack(BaseAttacker):
 
         adv_suffix = model.tokenizer.decode(torch.max(one_hot[grad_slice, :], dim=1)[1])
         print(adv_suffix)
-        return adv_suffix
+        return self.prompt + " " + adv_suffix
 
     def calculate_loss(self, one_hot, input_slice, target_slice, loss_slice):
         model = self.models[0].model

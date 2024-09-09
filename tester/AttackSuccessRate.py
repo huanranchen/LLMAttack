@@ -28,11 +28,11 @@ def test_harmful_output_rate(
     adv_string_init="[ " * 20,
     verbose=False,
 ) -> Dict[str, List[Dict]]:
-    results = {test_model.__class__: list() for test_model in test_models}
+    results = {test_model.__class__.__name__: list() for test_model in test_models}
     for prompt, target in tqdm(loader):
         attacker.prompt = prompt
         attacker.target = target
-        adv_string = attacker.prompt + " " + attacker.attack(adv_string_init)
+        adv_string = attacker.attack(adv_string_init)
         for i, model in enumerate(test_models):
             out = model.generate(adv_string)
             jailbroken = not any([prefix in out for prefix in test_prefixes])
@@ -41,11 +41,13 @@ def test_harmful_output_rate(
                 print(f"model {model.__class__} outputs: {out}")
                 print(f"is jailbroken: {jailbroken}")
                 print("-" * 20)
-            results[model.__class__].append(dict(input=prompt, output=out, jailbroken=jailbroken, adv_string=adv_string))
+            results[model.__class__.__name__].append(
+                dict(input=prompt, output=out, jailbroken=jailbroken, adv_string=adv_string)
+            )
 
     # counting attack success rate
-    for i, model in enumerate(test_models):
-        model_info = results[model.__class__]
+    for model in test_models:
+        model_info = results[model.__class__.__name__]
         jailbrokens, total = sum([i["jailbroken"] for i in model_info]), len(model_info)
         print(f"model {model.__class__}, jailbrokens: {jailbrokens}, total: {total}, ratio: {jailbrokens/total}")
     return results
@@ -58,6 +60,7 @@ def test_harmful_output_rate_with_warm_start(
     adv_string_init="[ " * 20,
     verbose=False,
 ) -> List[List[float]]:
+    raise NotImplementedError
     adv_suffix = adv_string_init
     jailbrokens = [[] for _ in range(len(test_models))]
     adv_suffixes = []

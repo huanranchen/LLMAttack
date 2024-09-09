@@ -60,7 +60,7 @@ class BaseModel(nn.Module):
         """
         input_ids, grad_slice, target_slice, loss_slice = self.get_prompt(question, "", "")
         if verbose:
-            print("actual input is: ", self.tokenizer.decode(input_ids))
+            print("actual input is: \n", self.tokenizer.decode(input_ids), "\n" * 5)
         outputs = self.model.generate(
             input_ids.unsqueeze(0),  # 1, L
             max_length=self.generation_max_length if max_length is None else max_length,

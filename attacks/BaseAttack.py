@@ -28,11 +28,11 @@ class BaseAttacker:
         return self.attack(*args, **kwargs)
 
     @abstractmethod
-    def attack(self, *args, **kwargs):
+    def attack(self, *args, **kwargs) -> str:
         """
         :param args: a suffix string
         :param kwargs: configurations
-        :return: an optimized suffix string
+        :return: an optimized adversarial string. Should contain all inputs to the model
         """
         pass
 
