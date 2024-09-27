@@ -34,7 +34,7 @@ def get_open_wiki_text_loader_for_train(
     else:
         dataset = load_dataset("openwebtext", cache_dir="./resources/openwebtext/")["train"]
         dataset = dataset.map(preprocess_and_tokenize)
-        # dataset.save_to_disk(saving_path)
+        dataset.save_to_disk(saving_path)
     dataset = dataset.with_format("torch")
 
     if not ddp:

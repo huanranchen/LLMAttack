@@ -10,10 +10,7 @@ def collate_fn_by_padding(batch: List[Dict[str, Tensor]], global_max_length: int
     # 2. padding.
     max_length = max(len(x["input_ids"]) for x in batch)
     padded_batch = [
-        torch.cat(
-            [x["input_ids"], torch.zeros(max_length - x["input_ids"].numel(), dtype=torch.int)],
-            dim=0,
-        )
+        torch.cat([x["input_ids"], torch.zeros(max_length - x["input_ids"].numel(), dtype=torch.int)], dim=0)
         for x in batch
     ]
     attention_mask = [

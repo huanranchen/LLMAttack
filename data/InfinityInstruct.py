@@ -31,7 +31,8 @@ def get_infinity_instruct_loader_for_train(
         text_c = text[1]["value"]
         text_d = "### Human: " + text[0]["value"]
         text_e = "\n### Assistant: " + text[1]["value"]
-        text = random.choice([text_a, text_b, text_c, text_d, text_e])
+        # text = random.choice([text_a, text_b, text_c, text_d, text_e])
+        text = text_a
         tokens = tokenizer(text, return_attention_mask=False)
         # add in EOS token
         tokens["input_ids"].append(tokenizer.eos_token_id)

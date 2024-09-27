@@ -67,11 +67,11 @@ class GPTAutoRegressiveTrainer:
                 scaler.update()
             epoch_loss += loss.item()
             if step % 10 == 0:
-                pbar.set_postfix_str(f"step {step}, loss {epoch_loss / step}")
+                pbar.set_postfix_str(f"step {step}, loss {epoch_loss * gradient_accumulation / step}")
             if self.eval_mode == "step_eval" and step % eval_frequency == 0:
                 self.evaluate(epoch, step, ddp)
                 model.train().requires_grad_(True)
-        epoch_loss /= len(pbar)
+        epoch_loss = epoch_loss / len(pbar) * gradient_accumulation
         return epoch_loss
 
     def evaluate(self, epoch: int, step: int, ddp: bool):

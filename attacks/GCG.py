@@ -12,9 +12,6 @@ from torch import nn
 import numpy as np
 
 
-__all__ = ["GCGAttack", "MomentumGCG"]
-
-
 def get_embedding_matrix(model):
     if isinstance(model, GPTJForCausalLM) or isinstance(model, GPT2LMHeadModel):
         return model.transformer.wte.weight
@@ -35,23 +32,6 @@ def get_embeddings(model, input_ids):
         return model.base_model.embed_in(input_ids).half()
     else:
         raise ValueError(f"Unknown model type: {type(model)}")
-
-
-def sample_control(control_toks, grad, batch_size, topk=256, temp=1, not_allowed_tokens=None):
-    if not_allowed_tokens is not None:
-        grad[:, not_allowed_tokens.to(grad.device)] = np.infty
-
-    top_indices = (-grad).topk(topk, dim=1).indices  # L, K
-    control_toks = control_toks.to(grad.device)  # L
-
-    original_control_toks = control_toks.repeat(batch_size, 1)  # B, L
-    new_token_pos = torch.arange(0, len(control_toks), len(control_toks) / batch_size, device=grad.device).to(torch.long)
-    new_token_val = torch.gather(
-        top_indices[new_token_pos], 1, torch.randint(0, topk, (batch_size, 1), device=grad.device)
-    )  # B, 1
-    new_control_toks = original_control_toks.scatter_(1, new_token_pos.unsqueeze(-1), new_token_val)  # B, L
-
-    return new_control_toks
 
 
 def sample_control_beam(control_toks, grad, batch_size, topk=32, temp=1, not_allowed_tokens=None):
@@ -80,9 +60,10 @@ def get_nonascii_toks(tokenizer, device="cpu"):
 
     ascii_toks = []
     for i in range(3, tokenizer.vocab_size):
-        if not is_ascii(tokenizer.decode([i])):
+        decoded = tokenizer.decode([i])
+        # 如果不是ASCII，或者是幽灵token
+        if not is_ascii(decoded) or len(decoded) == 0:
             ascii_toks.append(i)
-
     if tokenizer.bos_token_id is not None:
         ascii_toks.append(tokenizer.bos_token_id)
     if tokenizer.eos_token_id is not None:
@@ -91,7 +72,6 @@ def get_nonascii_toks(tokenizer, device="cpu"):
         ascii_toks.append(tokenizer.pad_token_id)
     if tokenizer.unk_token_id is not None:
         ascii_toks.append(tokenizer.unk_token_id)
-
     return torch.tensor(ascii_toks, device=device)
 
 
@@ -113,68 +93,6 @@ def get_filtered_cands(tokenizer, control_cand, filter_cand=True, curr_control=N
         cands = cands + [cands[-1]] * (len(control_cand) - len(cands))
         # print(f"Warning: {round(count / len(control_cand), 2)} control candidates were not valid")
     return cands
-
-
-def get_losses(
-    *, model, tokenizer, input_ids, control_slice, target_slice, test_controls=None, return_ids=False, batch_size=512
-):
-    if isinstance(test_controls[0], str):
-        max_len = control_slice.stop - control_slice.start
-        test_ids = [
-            torch.tensor(tokenizer(control, add_special_tokens=False).input_ids[:max_len], device=model.device)
-            for control in test_controls
-        ]
-        pad_tok = 0
-        while pad_tok in input_ids or any([pad_tok in ids for ids in test_ids]):
-            pad_tok += 1
-        nested_ids = torch.nested.nested_tensor(test_ids)
-        test_ids = torch.nested.to_padded_tensor(nested_ids, pad_tok, (len(test_ids), max_len))
-    else:
-        raise ValueError(f"test_controls must be a list of strings, got {type(test_controls)}")
-
-    if not (test_ids[0].shape[0] == control_slice.stop - control_slice.start):
-        raise ValueError(
-            (
-                f"test_controls must have shape "
-                f"(n, {control_slice.stop - control_slice.start}), "
-                f"got {test_ids.shape}"
-            )
-        )
-
-    locs = torch.arange(control_slice.start, control_slice.stop).repeat(test_ids.shape[0], 1).to(model.device)
-    ids = torch.scatter(input_ids.unsqueeze(0).repeat(test_ids.shape[0], 1).to(model.device), 1, locs, test_ids)
-    if pad_tok >= 0:
-        attn_mask = (ids != pad_tok).type(ids.dtype)
-    else:
-        attn_mask = None
-
-    losses = batch_calculate_loss(
-        model=model, input_ids=ids, attention_mask=attn_mask, batch_size=batch_size, target_slice=target_slice
-    )
-    return losses
-
-
-@torch.no_grad()
-def batch_calculate_loss(*, model, input_ids, attention_mask, target_slice, batch_size=512):
-    losses = []
-    for i in range(0, input_ids.shape[0], batch_size):
-        batch_input_ids = input_ids[i : i + batch_size]
-        if attention_mask is not None:
-            batch_attention_mask = attention_mask[i : i + batch_size]
-        else:
-            batch_attention_mask = None
-        outputs = model(input_ids=batch_input_ids, attention_mask=batch_attention_mask)
-        logit = outputs.logits
-        losses.append(target_loss(logit, batch_input_ids, target_slice))
-
-    return torch.cat(losses, dim=0)
-
-
-def target_loss(logits, ids, target_slice):
-    crit = nn.CrossEntropyLoss(reduction="none")
-    loss_slice = slice(target_slice.start - 1, target_slice.stop - 1)
-    loss = crit(logits[:, loss_slice, :].transpose(1, 2), ids[:, target_slice])
-    return loss.mean(dim=-1)
 
 
 class GCGAttack(BaseAttacker):
@@ -203,7 +121,7 @@ class GCGAttack(BaseAttacker):
         adv_suffix_tokens = input_ids[grad_slice].to(self.device)
 
         # Step 3.2 Randomly sample a batch of replacements.
-        new_adv_suffix_toks = sample_control(
+        new_adv_suffix_toks = self.sample_control(
             adv_suffix_tokens,
             coordinate_grad,
             self.batch_size,
@@ -220,7 +138,7 @@ class GCGAttack(BaseAttacker):
         )
 
         # Step 3.4 Compute loss on these candidates and take the argmin.
-        losses = get_losses(
+        losses = self.get_losses(
             model=model,
             tokenizer=model.tokenizer,
             input_ids=input_ids,
@@ -332,6 +250,98 @@ class GCGAttack(BaseAttacker):
         # 打印各个token是top几
         print("Target positions: ", topk)
         print("-" * 100)
+
+    def get_losses(
+        self,
+        *,
+        model,
+        tokenizer,
+        input_ids,
+        control_slice,
+        target_slice,
+        test_controls=None,
+        return_ids=False,
+        batch_size=512,
+    ):
+        if isinstance(test_controls[0], str):
+            max_len = control_slice.stop - control_slice.start
+            test_ids = [
+                torch.tensor(tokenizer(control, add_special_tokens=False).input_ids[:max_len], device=model.device)
+                for control in test_controls
+            ]
+            pad_tok = 0
+            while pad_tok in input_ids or any([pad_tok in ids for ids in test_ids]):
+                pad_tok += 1
+            nested_ids = torch.nested.nested_tensor(test_ids)
+            test_ids = torch.nested.to_padded_tensor(nested_ids, pad_tok, (len(test_ids), max_len))
+        else:
+            raise ValueError(f"test_controls must be a list of strings, got {type(test_controls)}")
+
+        if not (test_ids[0].shape[0] == control_slice.stop - control_slice.start):
+            raise ValueError(
+                (
+                    f"test_controls must have shape "
+                    f"(n, {control_slice.stop - control_slice.start}), "
+                    f"got {test_ids.shape}"
+                )
+            )
+
+        locs = torch.arange(control_slice.start, control_slice.stop).repeat(test_ids.shape[0], 1).to(model.device)
+        ids = torch.scatter(input_ids.unsqueeze(0).repeat(test_ids.shape[0], 1).to(model.device), 1, locs, test_ids)
+        if pad_tok >= 0:
+            attn_mask = (ids != pad_tok).type(ids.dtype)
+        else:
+            attn_mask = None
+
+        losses = self.batch_calculate_loss(
+            model=model,
+            input_ids=ids,
+            attention_mask=attn_mask,
+            batch_size=batch_size,
+            target_slice=target_slice,
+            control_slice=control_slice,
+        )
+        return losses
+
+    @torch.no_grad()
+    def batch_calculate_loss(self, *, model, input_ids, attention_mask, target_slice, control_slice, batch_size=512):
+        losses = []
+        for i in range(0, input_ids.shape[0], batch_size):
+            batch_input_ids = input_ids[i : i + batch_size]
+            if attention_mask is not None:
+                batch_attention_mask = attention_mask[i : i + batch_size]
+            else:
+                batch_attention_mask = None
+            outputs = model(input_ids=batch_input_ids, attention_mask=batch_attention_mask)
+            logit = outputs.logits
+            losses.append(self.target_loss(batch_input_ids, logit, batch_input_ids, target_slice, control_slice))
+
+        return torch.cat(losses, dim=0)
+
+    def target_loss(self, batch_input_ids, logits, ids, target_slice, control_slice):
+        crit = nn.CrossEntropyLoss(reduction="none")
+        loss_slice = slice(target_slice.start - 1, target_slice.stop - 1)
+        loss = crit(logits[:, loss_slice, :].transpose(1, 2), ids[:, target_slice])
+        return loss.mean(dim=-1)
+
+    @staticmethod
+    def sample_control(control_toks, grad, batch_size, topk=256, temp=1, not_allowed_tokens=None):
+        if not_allowed_tokens is not None:
+            grad[:, not_allowed_tokens.to(grad.device)] = np.infty
+
+        top_indices = (-grad).topk(topk, dim=1).indices  # L, K
+        control_toks = control_toks.to(grad.device)  # L
+
+        original_control_toks = control_toks.repeat(batch_size, 1)  # B, L
+        new_token_pos = torch.arange(0, len(control_toks), len(control_toks) / batch_size, device=grad.device).to(
+            torch.long
+        )
+        new_token_val = torch.gather(
+            top_indices[new_token_pos], 1, torch.randint(0, topk, (batch_size, 1), device=grad.device)
+        )  # B, 1
+        new_control_toks = original_control_toks.scatter_(1, new_token_pos.unsqueeze(-1), new_token_val)  # B, L
+
+        return new_control_toks
 
 
 class MomentumGCG(GCGAttack):

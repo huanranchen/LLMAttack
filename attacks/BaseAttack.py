@@ -36,7 +36,7 @@ class BaseAttacker:
         """
         pass
 
-    def check_success(self, adv_suffix: str, target_ids=None, max_length=120) -> bool:
+    def check_success(self, adv_suffix: str, target_ids=None, max_length=300) -> bool:
         model = self.models[0]
         out, logits = model.generate(self.prompt + " " + adv_suffix, max_length=max_length, return_logits=True)
         jailbroken = not any([prefix in out for prefix in test_prefixes])

@@ -77,6 +77,14 @@ class BaseModel(nn.Module):
         logits = logits if logits.shape[0] == (ids.numel() - input_ids.numel()) else logits[input_ids.numel() :]
         return answer if not return_logits else (answer, logits)
 
+    def generate_by_input_ids(self, input_ids: Tensor, *args, **kwargs) -> Tensor:
+        """
+        given input ids, return generate results. Similar to huggingface generate.
+        :param input_ids:
+        :return: output_ids
+        """
+        return self.model.generate(input_ids, *args, **kwargs)
+
     def generate_by_next_token_prediction(self, inputs: str, max_length=300) -> str:
         """
         Given input string, generate the following tokens
