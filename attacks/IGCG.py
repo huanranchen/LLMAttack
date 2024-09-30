@@ -17,7 +17,7 @@ def change_dataset_to_i_gcg_target(loader: Iterable or List[List[str]]) -> List[
 
 class ImprovedGCG(GCGAttack):
     def __init__(self, *args, adv_string_init="[ " * 20, **kwargs):
-        super(GCGAttack).__init__(*args, adv_string_init=adv_string_init, **kwargs)
+        super(ImprovedGCG, self).__init__(*args, adv_string_init=adv_string_init, **kwargs)
 
     def attack(self):
         result = super(ImprovedGCG, self).attack()
