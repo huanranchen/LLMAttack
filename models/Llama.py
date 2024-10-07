@@ -69,10 +69,16 @@ class Llama3(Llama2):
         now_tokens = self.tokenizer(self.conv.get_prompt()[:-5], *args, **kwargs).input_ids
         usr_prompt_length = len(now_tokens)
 
-        self.conv.update_last_message(f"{usr_prompt} {adv_suffix}")
+        # llama3的词比较多，有时候会把空格也算进一个token中。
+        # 这种情况下如果使用{usr_prompt} {adv_suffix}，那么每次decode的话adv_suffix里会带一个空格，前面又会带一个空格，空格就会越来越多
+        # 我并没有改系统库的代码，因此相当于用{usr_prompt}{adv_suffix}攻击{usr_prompt} {adv_suffix}。
+        # 这可能对迁移性造成问题。但至少比一边优化一边加空格要好
+        # 如果不加空格，adv_suffix有可能吃掉前一个token。
+        # 解决方案：禁止使用带空格的token+使用空格。这并不是为了增加迁移性。而是因为不这样连白盒都不行。
+        self.conv.update_last_message(f"{usr_prompt} {adv_suffix} ")
         now_tokens = self.tokenizer(self.conv.get_prompt()[:-5], *args, **kwargs).input_ids
         total_prompt_length = len(now_tokens)
-        grad_slice = slice(usr_prompt_length + 1, total_prompt_length)
+        grad_slice = slice(usr_prompt_length, total_prompt_length - 1)
 
         self.conv.append_message(self.conv.roles[1], "")
         now_tokens = self.tokenizer(self.conv.get_prompt()[:-5], *args, **kwargs).input_ids

@@ -15,11 +15,18 @@ class AutoDAN(GCGAttack):
         w1: float = 3,
         w2: float = 100,
         tau: float = 1,
-        num_steps: int = 30,
-        batch_size: int = 512,  # TODO: 理论上加了kv cache后这个可以巨大
+        num_steps: int = 100,
+        batch_size: int = 512,  # 理论上加了kv cache后这个可以巨大
+        batch_size_for_calculating_loss: int = 16,
         **kwargs
     ):
-        super(AutoDAN, self).__init__(*args, num_steps=num_steps, batch_size=batch_size, **kwargs)
+        super(AutoDAN, self).__init__(
+            *args,
+            num_steps=num_steps,
+            batch_size=batch_size,
+            batch_size_for_calculating_loss=batch_size_for_calculating_loss,
+            **kwargs
+        )
         self.w1, self.w2, self.tau = w1, w2, tau
         self.past_key_values = ()
 
@@ -29,7 +36,8 @@ class AutoDAN(GCGAttack):
         adv_suffix = ""
         for step in range(1, self.num_steps + 1):
             # Step 0. Add a new token.
-            adv_suffix = adv_suffix + "!"  # TODO: 这个!也可以继续修改
+            adv_suffix = adv_suffix + "!"  # 这个!也可以继续修改成别的token，可能效果更好。
+            # 但是如果修改成[，一旦出现[[，由于llama2中[[和[token个数相同，就会死循环
             # Step 1. Tokenization.
             input_ids, grad_slice, target_slice, loss_slice = model.get_prompt(self.prompt, adv_suffix, self.target)
             # Step 2. Compute Coordinate Gradient
@@ -163,10 +171,8 @@ class AutoDAN(GCGAttack):
         batch_input_ids is B, L
         """
         # 因为使用了kv cache，为了不改变原来的代码，直接padding回去，这样最简单
-        padding = torch.zeros(
-            (batch_input_ids.shape[0], control_slice.stop - 1, logits.shape[2]), device=logits.device
-        )
-        logits = torch.cat([padding, logits], dim=1)   # B, L, |V|
+        padding = torch.zeros((batch_input_ids.shape[0], control_slice.stop - 1, logits.shape[2]), device=logits.device)
+        logits = torch.cat([padding, logits], dim=1)  # B, L, |V|
         # 后面是原来的代码
         crit = nn.CrossEntropyLoss(reduction="none")
         loss_slice = slice(target_slice.start - 1, target_slice.stop - 1)
