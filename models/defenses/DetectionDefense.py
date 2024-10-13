@@ -1,28 +1,40 @@
 import torch
 import numpy as np
 from typing import Tuple, Callable, List
+from abc import ABC, abstractmethod
 from torch import Tensor
 from transformers import AutoModelForCausalLM, AutoTokenizer
 from ..BaseModel import BaseModel
 
 
 class DetectionDefenseBase(BaseModel):
-    def __init__(
-        self, model: BaseModel, detector: Callable, refusal="I'm sorry, but I can't assist with that.", *args, **kwargs
-    ):
+    def __init__(self, model: BaseModel, refusal="I'm sorry, but I can't assist with that.", *args, **kwargs):
         """
         detector should return True if the input is harmful.
         """
         super(DetectionDefenseBase, self).__init__(model.model, model.tokenizer, model.conv, *args, **kwargs)
+        # 注意super这样写就注定了只能叠一层防御，不能多个防御同时叠加
         self.to_protect_model = model
-        self.detector = detector
         self.refusal = refusal
         self.refusal_ids = torch.tensor(self.tokenizer(refusal, add_special_tokens=False).input_ids, device=self.device)
+        refusal_logits = torch.zeros((self.refusal_ids.numel(), model.tokenizer.vocab_size), device=self.device)  # L, V
+        refusal_logits.scatter_(1, self.refusal_ids[:, None], 1)  # 只有拒绝部分是1，其他都是0
+        self.refusal_logits = refusal_logits  # L, V
+        # use to_protect_model's function
+        self.get_prompt = self.to_protect_model.get_prompt
 
-    def generate(self, question: str, *args, **kwargs) -> str or Tuple[str, Tensor]:
+    @abstractmethod
+    def detector(self, string: str) -> bool:
+        pass
+
+    @abstractmethod
+    def batch_detector(self, string: List[str]) -> List[bool]:
+        pass
+
+    def generate(self, question: str, *args, return_logits: bool = False, **kwargs) -> str or Tuple[str, Tensor]:
         if self.detector(question):
-            return self.refusal
-        return self.to_protect_model.generate(question, *args, **kwargs)
+            return self.refusal if not return_logits else (self.refusal, self.refusal_logits)
+        return self.to_protect_model.generate(question, *args, return_logits=return_logits, **kwargs)
 
     def generate_by_input_ids(self, input_ids: Tensor, *args, **kwargs) -> Tensor:
         """
@@ -37,10 +49,27 @@ class DetectionDefenseBase(BaseModel):
             return self.refusal_ids
         return self.to_protect_model.generate_by_input_ids(input_ids, *args, **kwargs)
 
+    def forward(self, input_ids: Tensor, *args, **kwargs):
+        """
+        Given a input ids, if not detected by detector, return normal input. Otherwise return an zero logits
+        forward函数也要重写,不重写的话直接model.forward相当于调用的to_be_protected_model，攻击时loss算的不对
+        input_ids:  B, L
+        """
+        texts = self.tokenizer.batch_decode(input_ids)
+        # Get the question part, and only use this part to detect.
+        role0, role1 = self.conv.roles[0], self.conv.roles[1]
+        questions = [text[text.find(role0) + len(role0) : text.find(role1)] for text in texts]
+        is_refuse = torch.tensor(self.batch_detector(questions), device=self.device)  # B, like True False True
+        output = self.to_protect_model.forward(input_ids, *args, **kwargs)
+        # return一个攻击不成功的logit。之所以不return拒绝logits，是因为找不到拒绝的位置在哪。。
+        output.logits[is_refuse] = torch.zeros_like(output.logits[is_refuse])
+        # 除了logits外，其他也要改。这里目前还没改。
+        return output
+
 
 class PerplexityDetectorDefense(DetectionDefenseBase):
     def __init__(self, model: BaseModel, *args, ppl_threshold: float = 884, model_name: str = "gpt2", **kwargs):
-        super(PerplexityDetectorDefense, self).__init__(model, self.detector, *args, **kwargs)
+        super(PerplexityDetectorDefense, self).__init__(model, *args, **kwargs)
         self.ppl_threshold = ppl_threshold
         self.detector_model = AutoModelForCausalLM.from_pretrained(model_name)
         self.detector_tokenizer = AutoTokenizer.from_pretrained(model_name)
@@ -50,6 +79,11 @@ class PerplexityDetectorDefense(DetectionDefenseBase):
         results = self.compute_perplexity([string])
         ppl = results["perplexities"][0]
         return ppl > self.ppl_threshold
+
+    def batch_detector(self, string: List[str]) -> List[bool]:
+        results = self.compute_perplexity(string)
+        ppl = results["perplexities"]
+        return [i > self.ppl_threshold for i in ppl]
 
     def compute_perplexity(
         self, predictions: List[str], batch_size: int = 16, add_start_token: bool = True, max_length=None
@@ -96,11 +130,11 @@ class PerplexityDetectorDefense(DetectionDefenseBase):
         if add_start_token:
             assert torch.all(torch.ge(attn_masks.sum(1), 1)), "Each input text must be at least one token long."
         else:
-            assert torch.all(
-                torch.ge(attn_masks.sum(1), 2)
-            ), ("When add_start_token=False, each input text must be at least two tokens long. "
+            assert torch.all(torch.ge(attn_masks.sum(1), 2)), (
+                "When add_start_token=False, each input text must be at least two tokens long. "
                 "Run with add_start_token=True if inputting strings of only one token, "
-                "and remove all empty input strings.")
+                "and remove all empty input strings."
+            )
 
         ppls = []
         loss_fct = torch.nn.CrossEntropyLoss(reduction="none")

@@ -3,7 +3,7 @@ import argparse
 from models.defenses import PromptATPrefix, PerplexityDetectorDefense, ICD, SelfReminder
 from models.SEDD import DiffTextPureUniform, DiffTextPureAbsorb
 from models import Vicuna15, Llama3, Llama2
-from attacks import AutoDAN, GCGAttack, ImprovedGCG, InContextAttack
+from attacks import AutoDAN, GCGAttack, ImprovedGCG, InContextAttack, IGCGOnlyEnumerate
 from tester import forbid_initialization, test_harmful_output_rate
 from data import get_adv_bench_behaviors_50
 
@@ -26,7 +26,9 @@ defenses = dict(
     difftextpureuniform=DiffTextPureUniform,
     difftextpureabsorb=DiffTextPureAbsorb,
 )
-attackers = dict(gcg=GCGAttack, igcg=ImprovedGCG, autodan=AutoDAN, ica=InContextAttack)
+attackers = dict(
+    gcg=GCGAttack, igcg=ImprovedGCG, autodan=AutoDAN, ica=InContextAttack, igcgonlyenumerate=IGCGOnlyEnumerate
+)
 
 parser = argparse.ArgumentParser()
 parser.add_argument("--model", choices=to_be_protected_models.keys())
@@ -56,7 +58,13 @@ if args.debug:
 # systematic test
 attacker.verbose = False
 os.makedirs("./results/", exist_ok=True)
-saving_path = f"./results/{args.model}_{args.defender}_{args.attacker}_whitebox{args.white_box}_advbench_50.json"
+os.makedirs("./results/whitebox", exist_ok=True)
+os.makedirs("./results/blackbox", exist_ok=True)
+saving_path = (
+    "./results/"
+    + ("whitebox" if args.white_box else "blackbox")
+    + f"/{args.model}_{args.defender}_{args.attacker}_advbench_50.json"
+)
 results = test_harmful_output_rate(
     attacker,
     loader,

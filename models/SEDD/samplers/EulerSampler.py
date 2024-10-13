@@ -95,8 +95,9 @@ class EulerSEDDSampler(BaseSEDDSampler):
         后面再加随机噪声。只取有效部分返回 。
         noise_level=1的话等价于直接生成新句子。
         """
-        # 1. get the embedding
-        x = torch.tensor(self.tokenizer.batch_encode_plus(x, add_special_tokens=False)["input_ids"], device=self.device)
+        # 1. get the embedding. If no, automatically pad it.
+        x = self.tokenizer.batch_encode_plus(x, add_special_tokens=False, return_tensors="pt", padding=True)
+        x = x.input_ids.to(self.device)
         # padding to 1024
         effective_length = x.shape[1]
         padding = torch.randint(0, self.graph.dim, (x.shape[0], 1024 - effective_length), device=self.device)

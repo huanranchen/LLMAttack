@@ -9,6 +9,7 @@ from transformers import (
     LlamaForCausalLM,
 )
 from torch import nn
+from typing import List
 import numpy as np
 
 
@@ -44,18 +45,18 @@ def get_nonascii_toks(tokenizer, device="cpu"):
         # 如果不是ASCII，或者是幽灵token，或者是空格前序token
         if not is_ascii(decoded) or len(decoded) == 0:
             ascii_toks.append(i)
-    if tokenizer.bos_token_id is not None:
+    if hasattr(tokenizer, "bos_token_id") and tokenizer.bos_token_id is not None:
         ascii_toks.append(tokenizer.bos_token_id)
-    if tokenizer.eos_token_id is not None:
+    if hasattr(tokenizer, "eos_token_id") and tokenizer.eos_token_id is not None:
         ascii_toks.append(tokenizer.eos_token_id)
-    if tokenizer.pad_token_id is not None:
+    if hasattr(tokenizer, "pad_token_id") and tokenizer.pad_token_id is not None:
         ascii_toks.append(tokenizer.pad_token_id)
-    if tokenizer.unk_token_id is not None:
+    if hasattr(tokenizer, "unk_token_id") and tokenizer.unk_token_id is not None:
         ascii_toks.append(tokenizer.unk_token_id)
     return torch.tensor(ascii_toks, device=device)
 
 
-def get_filtered_cands(tokenizer, control_cand, filter_cand=True, curr_control=None):
+def get_filtered_cands(tokenizer, control_cand, filter_cand=True, curr_control=None) -> List[str]:
     cands, count = [], 0
     for i in range(control_cand.shape[0]):
         decoded_str = tokenizer.decode(control_cand[i], skip_special_tokens=True)

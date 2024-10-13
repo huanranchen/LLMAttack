@@ -1,12 +1,24 @@
 import torch
 from torch import Tensor
-from typing import Tuple
+from typing import Tuple, List
 from .BaseModel import BaseModel
-from transformers import AutoModelForCausalLM, AutoTokenizer, LlamaTokenizer, LlamaForCausalLM
+from transformers import AutoModelForCausalLM, AutoTokenizer, LlamaTokenizer, LlamaForCausalLM, SPIECE_UNDERLINE
 from fastchat.model import get_conversation_template
 
 
 __all__ = ["Llama2", "Llama3"]
+
+
+class Llama2RemoveLastApparitionTokenizer(LlamaTokenizer):
+    def __init__(self, *args, **kwargs):
+        super().__init__(*args, **kwargs)
+        self.pad_token = self.eos_token  # In llama2, pad token is actually EOS token
+
+    def _tokenize(self, text, **kwargs):
+        tokens = super()._tokenize(text, **kwargs)
+        if len(tokens) > 0 and tokens[-1] == SPIECE_UNDERLINE:
+            tokens.pop()
+        return tokens
 
 
 class Llama2(BaseModel):
@@ -14,8 +26,11 @@ class Llama2(BaseModel):
         model = AutoModelForCausalLM.from_pretrained(
             llama_2_path, torch_dtype=dtype, trust_remote_code=True, use_auth_token=True
         ).eval()
-        tokenizer = AutoTokenizer.from_pretrained(llama_2_path, trust_remote_code=True, use_fast=False)
+        tokenizer = Llama2RemoveLastApparitionTokenizer.from_pretrained(
+            llama_2_path, trust_remote_code=True, use_fast=False
+        )
         conv = get_conversation_template("llama-2")
+
         super(Llama2, self).__init__(model, tokenizer, conv, *args, **kwargs)
 
     def get_prompt(self, usr_prompt, adv_suffix, target, *args, **kwargs) -> Tuple[Tensor, slice, slice, slice]:
@@ -28,26 +43,42 @@ class Llama2(BaseModel):
         self.conv.messages.clear()
         self.conv.append_message(self.conv.roles[0], f"{usr_prompt}")
         now_tokens = self.tokenizer(self.conv.get_prompt(), *args, **kwargs).input_ids
+        now_tokens = self.remove_apparition_token(now_tokens)
         usr_prompt_length = len(now_tokens)  # since apparition token
 
         self.conv.update_last_message(f"{usr_prompt} {adv_suffix}")
         # self.conv.get_prompt()这玩意会往最后加个空格，导致出现29871多一个
         # 但是concatenation又是我们手动自己做的，导致下一次做的时候没有这个空格，因此产生错位
+        # 20241011时我换了另一个办法解决这个问题，直接remove掉所有的29871
         now_tokens = self.tokenizer(self.conv.get_prompt(), *args, **kwargs).input_ids
+        now_tokens = self.remove_apparition_token(now_tokens)
         total_prompt_length = len(now_tokens)
-        grad_slice = slice(usr_prompt_length - 1, total_prompt_length - 1)
+        grad_slice = slice(usr_prompt_length, total_prompt_length)
 
         self.conv.append_message(self.conv.roles[1], "")
         now_tokens = self.tokenizer(self.conv.get_prompt(), *args, **kwargs).input_ids
+        now_tokens = self.remove_apparition_token(now_tokens)
         target_slice_left = len(now_tokens) + 1 - 1
 
         self.conv.update_last_message(f"{target}")
         now_tokens = self.tokenizer(self.conv.get_prompt(), *args, **kwargs).input_ids
+        now_tokens = self.remove_apparition_token(now_tokens)
         target_slice_right = len(now_tokens) - 1 - 1 - 1  # no last token
         target_slice = slice(target_slice_left, target_slice_right)  # for output logits
         loss_slice = slice(target_slice_left - 1, target_slice_right - 1)
 
         return torch.tensor(now_tokens, device=self.device), grad_slice, target_slice, loss_slice
+
+    @staticmethod
+    def remove_apparition_token(input_ids: List[int]) -> List[int]:
+        """
+        Since llama2 has a bug about an apparition token 29871
+        https://github.com/huggingface/transformers/issues/26273
+        we need to remove it.
+        :param input_ids: L, a 1-D list
+        :return: input ids, a list with 29871 removed
+        """
+        return [token for token in input_ids if token != 29871]
 
 
 class Llama3(Llama2):
