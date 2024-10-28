@@ -29,7 +29,7 @@ class ImprovedGCG(GCGAttack):
 
 
 class IGCGOnlyEnumerate(ImprovedGCG):
-    def __init__(self, models: List[BaseModel], *args, adv_string_init="[ " * 20, **kwargs):
+    def __init__(self, models: List[BaseModel], *args, adv_string_init="[ " * 20 + "[", **kwargs):
         topk = min([model.tokenizer.vocab_size for model in models])
         super(IGCGOnlyEnumerate, self).__init__(models, *args, topk=topk, adv_string_init=adv_string_init, **kwargs)
 

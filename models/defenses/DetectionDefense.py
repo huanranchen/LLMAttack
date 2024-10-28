@@ -58,12 +58,14 @@ class DetectionDefenseBase(BaseModel):
         texts = self.tokenizer.batch_decode(input_ids)
         # Get the question part, and only use this part to detect.
         role0, role1 = self.conv.roles[0], self.conv.roles[1]
-        questions = [text[text.find(role0) + len(role0) : text.find(role1)] for text in texts]
+        begin_indices = [text.find(role0) + len(role0) for text in texts]
+        # end_indices从begin_indices后开始找role1，而不是之前。
+        end_indices = [text.find(role1, begin_idx) for begin_idx, text in zip(begin_indices, texts)]
+        questions = [text[begin_indices[i]: end_indices[i]] for i, text in enumerate(texts)]
         is_refuse = torch.tensor(self.batch_detector(questions), device=self.device)  # B, like True False True
         output = self.to_protect_model.forward(input_ids, *args, **kwargs)
         # return一个攻击不成功的logit。之所以不return拒绝logits，是因为找不到拒绝的位置在哪。。
         output.logits[is_refuse] = torch.zeros_like(output.logits[is_refuse])
-        # 除了logits外，其他也要改。这里目前还没改。
         return output
 
 

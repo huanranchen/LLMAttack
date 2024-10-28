@@ -54,6 +54,35 @@ class BaseModel(nn.Module):
         loss_slice = slice(target_slice_left - 1, target_slice_right - 1)
         return torch.tensor(now_tokens, device=self.device), grad_slice, target_slice, loss_slice
 
+    def get_prompt_raw(self, usr_prompt, adv_suffix, target, *args, **kwargs) -> Tuple[Tensor, slice, slice, slice]:
+        """
+        :param usr_prompt:
+        :param adv_suffix:
+        :param target:
+        :return: input_ids, grad_slice, target_slice, loss_slice (which corresponding output need calculate loss)
+        """
+        self.conv.messages.clear()
+        self.conv.append_message(self.conv.roles[0], f"{usr_prompt}")
+        now_tokens = self.tokenizer(self.conv.get_prompt(), *args, **kwargs).input_ids
+        usr_prompt_length = len(now_tokens)
+
+        self.conv.update_last_message(f"{usr_prompt} {adv_suffix}")
+        now_tokens = self.tokenizer(self.conv.get_prompt(), *args, **kwargs).input_ids
+        total_prompt_length = len(now_tokens)
+        grad_slice = slice(usr_prompt_length, total_prompt_length)
+
+        self.conv.append_message(self.conv.roles[1], "")
+        now_tokens = self.tokenizer(self.conv.get_prompt(), *args, **kwargs).input_ids
+        target_slice_left = len(now_tokens)
+
+        self.conv.update_last_message(f"{target}")
+        now_tokens = self.tokenizer(self.conv.get_prompt(), *args, **kwargs).input_ids
+        target_slice_right = len(now_tokens)
+        target_slice = slice(target_slice_left, target_slice_right)
+        loss_slice = slice(target_slice_left - 1, target_slice_right - 1)
+
+        return torch.tensor(now_tokens, device=self.device), grad_slice, target_slice, loss_slice
+
     def generate(self, question: str, max_length=None, verbose=False, return_logits=False) -> str or Tuple[str, Tensor]:
         """
         Given input string, generate the following tokens in chat mode. Will use fastchat conversation template

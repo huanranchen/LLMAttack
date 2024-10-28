@@ -1,4 +1,5 @@
 import torch
+import numpy as np
 from .BaseAttack import BaseAttacker
 from transformers import (
     AutoModelForCausalLM,
@@ -10,7 +11,7 @@ from transformers import (
 )
 from torch import nn
 from typing import List
-import numpy as np
+from collections import Counter
 
 
 def get_embedding_matrix(model):
@@ -88,7 +89,8 @@ class GCGAttack(BaseAttacker):
         batch_size_for_calculating_loss=16,  # this can be arbitrarily increase without hurting performance
         topk=256,
         device=torch.device("cuda" if torch.cuda.is_available() else "cpu"),
-        verbose=False,
+        early_return: bool = True,
+        verbose: bool = False,
     ):
         super(GCGAttack, self).__init__(models, prompt, target, verbose)
         self.num_steps = num_steps
@@ -97,10 +99,10 @@ class GCGAttack(BaseAttacker):
         self.device = device
         self.batch_size_for_calculating_loss = batch_size_for_calculating_loss
         self.adv_string_init = adv_string_init
+        self.early_return = early_return
 
     @torch.no_grad()
     def enumerate_best_token(self, input_ids, adv_suffix, target_slice, grad_slice, coordinate_grad, not_allowed_tokens):
-        model = self.models[0]
         adv_suffix_tokens = input_ids[grad_slice].to(self.device)
 
         # Step 3.2 Randomly sample a batch of replacements.
@@ -117,21 +119,23 @@ class GCGAttack(BaseAttacker):
         # so Encode(Decode(tokens)) may produce a different tokenization.
         # We ensure the number of token remains to prevent the memory keeps growing and run into OOM.
         new_adv_suffix = get_filtered_cands(
-            model.tokenizer, new_adv_suffix_toks, filter_cand=False, curr_control=adv_suffix
-        )
+            self.models[0].tokenizer, new_adv_suffix_toks, filter_cand=False, curr_control=adv_suffix
+        )  # List[str]
 
         # Step 3.4 Compute loss on these candidates and take the argmin.
-        losses = self.get_losses(
-            model=model,
-            tokenizer=model.tokenizer,
-            input_ids=input_ids,
-            control_slice=grad_slice,
-            test_controls=new_adv_suffix,
-            return_ids=True,
-            batch_size=self.batch_size_for_calculating_loss,
-            target_slice=target_slice,
-        )  # decrease this number if you run into OOM.
-
+        losses = []
+        for model in self.models:
+            loss = self.get_losses(
+                model=model,
+                tokenizer=model.tokenizer,
+                input_ids=input_ids,
+                control_slice=grad_slice,
+                test_controls=new_adv_suffix,
+                batch_size=self.batch_size_for_calculating_loss,
+                target_slice=target_slice,
+            )
+            losses.append(loss)
+        losses = torch.stack(losses).mean(0)
         best_new_adv_suffix_id = losses.argmin()
         best_new_adv_suffix = new_adv_suffix[best_new_adv_suffix_id]
 
@@ -152,13 +156,13 @@ class GCGAttack(BaseAttacker):
         adv_suffix = self.adv_string_init
         loss = 0
         for step in range(1, self.num_steps + 1):
+            # Step 1. Tokenization
             input_ids, grad_slice, target_slice, loss_slice = model.get_prompt(self.prompt, adv_suffix, self.target)
             # Step 2. Compute Coordinate Gradient
             coordinate_grad, topk = self.token_gradients(input_ids, grad_slice, target_slice, loss_slice)
             # Step 5. Verbose
             if self.verbose:
                 self.verbose_info(step, loss, adv_suffix, input_ids, grad_slice, target_slice, loss_slice, topk)
-            # grad_slice = slice(grad_slice.start + 1, grad_slice.stop + 1)
             # Step 3. Sample a batch of new tokens based on the coordinate gradient.
             # Notice that we only need the one that minimizes the loss.
             adv_suffix, loss = self.enumerate_best_token(
@@ -166,7 +170,8 @@ class GCGAttack(BaseAttacker):
             )
             # Step 4. Check Success
             if (loss < 0.5 or step % 10 == 0) and self.check_success(adv_suffix, input_ids[target_slice]):
-                return self.prompt + " " + adv_suffix
+                if self.early_return:
+                    return self.prompt + " " + adv_suffix
         return self.prompt + " " + adv_suffix
 
     def token_gradients(self, input_ids, input_slice, target_slice, loss_slice):
@@ -189,34 +194,38 @@ class GCGAttack(BaseAttacker):
         torch.Tensor
             The gradients of each token in the input_slice with respect to the loss.
         """
-        model = self.models[0].model
-        embed_weights = get_embedding_matrix(model)
+        # Step 1. Find the most frequent tokenizer, and get the gradient of models with this tokenizer
+        models = self.models
+        counter = Counter([model.tokenizer for model in models])
+        most_common_tokenizer, _ = counter.most_common(1)[0]
+        models = [model for model in models if isinstance(model.tokenizer, type(most_common_tokenizer))]
+        # Step 2. Initialize one-hot. L, D.
+        embed_weights = get_embedding_matrix(models[0].model)
         one_hot = torch.zeros(
-            input_ids[input_slice].shape[0], embed_weights.shape[0], device=model.device, dtype=embed_weights.dtype
+            input_ids[input_slice].shape[0], embed_weights.shape[0], device=models[0].device, dtype=embed_weights.dtype
         )
         one_hot.scatter_(
             1,
             input_ids[input_slice].unsqueeze(1),
-            torch.ones(one_hot.shape[0], 1, device=model.device, dtype=embed_weights.dtype),
+            torch.ones(one_hot.shape[0], 1, device=models[0].device, dtype=embed_weights.dtype),
         )
         one_hot.requires_grad_()
-        input_embeds = (one_hot @ embed_weights).unsqueeze(0)
-
-        # now stitch it together with the rest of the embeddings
-        embeds = get_embeddings(model, input_ids.unsqueeze(0)).detach()
-        full_embeds = torch.cat(
-            [embeds[:, : input_slice.start, :], input_embeds, embeds[:, input_slice.stop :, :]], dim=1
-        )
-
-        logits = model(inputs_embeds=full_embeds).logits
-        targets = input_ids[target_slice]
-        loss = nn.CrossEntropyLoss()(logits[0, loss_slice, :], targets)
-        loss.backward()
-
+        # Step 3. Get Grad.
+        for model in models:
+            embed_weights = get_embedding_matrix(model.model)
+            input_embeds = (one_hot @ embed_weights).unsqueeze(0)
+            # now stitch it together with the rest of the embeddings
+            embeds = get_embeddings(model.model, input_ids.unsqueeze(0)).detach()
+            full_embeds = torch.cat(
+                [embeds[:, : input_slice.start, :], input_embeds, embeds[:, input_slice.stop :, :]], dim=1
+            )
+            logits = model(inputs_embeds=full_embeds).logits
+            targets = input_ids[target_slice]
+            loss = nn.CrossEntropyLoss()(logits[0, loss_slice, :], targets)
+            loss.backward()
         grad = one_hot.grad.clone()
         grad = grad / grad.norm(dim=-1, keepdim=True)
-
-        # Compute topk
+        # Step 4. Compute topk for verbose
         prediction = torch.topk(logits[0, loss_slice, :], k=10, dim=1)[1]  # L, K
         position_table = prediction == targets.unsqueeze(1)
         topk = torch.max(position_table, dim=1)[1]
@@ -249,7 +258,6 @@ class GCGAttack(BaseAttacker):
         control_slice,
         target_slice,
         test_controls=None,
-        return_ids=False,
         batch_size=512,
     ):
         if isinstance(test_controls[0], str):
@@ -274,7 +282,7 @@ class GCGAttack(BaseAttacker):
                     f"got {test_ids.shape}"
                 )
             )
-
+        # Insert new adv tokens into original input_ids
         locs = torch.arange(control_slice.start, control_slice.stop).repeat(test_ids.shape[0], 1).to(model.device)
         ids = torch.scatter(input_ids.unsqueeze(0).repeat(test_ids.shape[0], 1).to(model.device), 1, locs, test_ids)
         if pad_tok >= 0:
@@ -334,28 +342,38 @@ class GCGAttack(BaseAttacker):
 
 
 class MomentumGCG(GCGAttack):
-    def __init__(self, *args, mu=1, **kwargs):
-        super(MomentumGCG, self).__init__(*args, **kwargs)
+    def __init__(self, *args, mu=1, adv_string_init="[ " * 20 + "[", **kwargs):
+        super(MomentumGCG, self).__init__(*args, adv_string_init=adv_string_init, **kwargs)
         self.mu = mu
 
     def attack(self):
         model = self.models[0]
         not_allowed_tokens = get_nonascii_toks(model.tokenizer)
         adv_suffix = self.adv_string_init
-        momentum = 0
+        loss, momentum = 0, None
         for step in range(1, self.num_steps + 1):
             input_ids, grad_slice, target_slice, loss_slice = model.get_prompt(self.prompt, adv_suffix, self.target)
             # Step 2. Compute Coordinate Gradient
             coordinate_grad, topk = self.token_gradients(input_ids, grad_slice, target_slice, loss_slice)
-            momentum = momentum * self.mu + coordinate_grad
+            if momentum is None:  # 因为现在对抗样本可能因为tokenization问题越来越长或者突然变短，所以需要这样写
+                momentum = coordinate_grad
+            elif coordinate_grad.shape[0] > momentum.shape[0]:
+                coordinate_grad[: momentum.shape[0]] = coordinate_grad[: momentum.shape[0]] + momentum * self.mu
+                momentum = coordinate_grad
+            else:
+                momentum = momentum[: coordinate_grad.shape[0]]
+                momentum = self.mu * momentum + coordinate_grad
+            # Step 5. Verbose
+            if self.verbose:
+                self.verbose_info(step, loss, adv_suffix, input_ids, grad_slice, target_slice, loss_slice, topk)
+            # grad_slice = slice(grad_slice.start + 1, grad_slice.stop + 1)
             # Step 3. Sample a batch of new tokens based on the coordinate gradient.
             # Notice that we only need the one that minimizes the loss.
             adv_suffix, loss = self.enumerate_best_token(
                 input_ids, adv_suffix, target_slice, grad_slice, momentum, not_allowed_tokens
             )
+            # Step 4. Check Success
             if (loss < 0.5 or step % 10 == 0) and self.check_success(adv_suffix, input_ids[target_slice]):
-                return adv_suffix
-            # Step 5. Verbose
-            if self.verbose:
-                self.verbose_info(step, loss, adv_suffix, input_ids, grad_slice, target_slice, loss_slice, topk)
-        return adv_suffix
+                if self.early_return:
+                    return self.prompt + " " + adv_suffix
+        return self.prompt + " " + adv_suffix

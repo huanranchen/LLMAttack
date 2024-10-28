@@ -14,7 +14,7 @@ laion_clip3 = OpenClipAttackLanguageModel(
 laion_clip4 = OpenClipAttackLanguageModel("hf-hub:laion/CLIP-ViT-bigG-14-laion2B-39B-b160k", target_text)
 models = [laion_clip, laion_clip4, laion_clip3, laion_clip2]
 
-all_models_names = [Vicuna15, Llama2, Llama3]
+all_models_names = [Vicuna15]
 all_models = []
 num_gpus = torch.cuda.device_count()
 num_models_each_gpu = len(all_models_names) / num_gpus
@@ -22,7 +22,7 @@ for i, model_name in enumerate(all_models_names):
     model = model_name(device=torch.device(f"cuda:{num_gpus-1-int(i / num_models_each_gpu)}"))
     all_models.append(model)
 
-attacker = ClipGCGAttack(models, adv_string_init="[ " * 20, num_steps=100, verbose=True)
+attacker = ClipGCGAttack(models, adv_string_init="[ " * 20, num_steps=500, verbose=True)
 # A small demo for debug
 attacker.attack()
 attacker.verbose = False
