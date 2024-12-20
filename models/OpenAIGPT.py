@@ -30,7 +30,7 @@ class OpenAIGPT(BaseModel):
 
 class OpenAIGPTWithChatTemplate(BaseModel):
     def __init__(self, model_name: str = "openai-community/openai-gpt", *args, **kwargs):
-        assert model_name in openai_all_gpts
+        # assert model_name in openai_all_gpts
         tokenizer = AutoTokenizer.from_pretrained(model_name)
         model = AutoModelForCausalLM.from_pretrained(model_name)
         conv = get_conv_template("vicuna_v1.1")  # personally I like this template most.

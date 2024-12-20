@@ -6,8 +6,9 @@ from typing import List, Callable
 
 
 class EulerSEDDSampler(BaseSEDDSampler):
-    def __init__(self, model, tokenizer, noise, graph, *args, **kwargs):
+    def __init__(self, model, tokenizer, noise, graph, purify_noise_level: float = 0.25, *args, **kwargs):
         super(EulerSEDDSampler, self).__init__(model, tokenizer, noise, graph, *args, **kwargs)
+        self.purify_noise_level = purify_noise_level
 
     def sample(
         self,
@@ -90,7 +91,9 @@ class EulerSEDDSampler(BaseSEDDSampler):
         text_samples = self.tokenizer.batch_decode(x[:, :effective_length])
         return text_samples
 
-    def purify_with_truncation(self, x: List[str], noise_level=0.25, total_steps=160, *args, **kwargs) -> List[str]:
+    def purify_with_truncation(
+        self, x: List[str], total_steps=160, padding_length: int = 1024, *args, **kwargs
+    ) -> List[str]:
         """
         后面再加随机噪声。只取有效部分返回 。
         noise_level=1的话等价于直接生成新句子。
@@ -98,16 +101,18 @@ class EulerSEDDSampler(BaseSEDDSampler):
         # 1. get the embedding. If no, automatically pad it.
         x = self.tokenizer.batch_encode_plus(x, add_special_tokens=False, return_tensors="pt", padding=True)
         x = x.input_ids.to(self.device)
-        # padding to 1024
+        # Cut to max length
+        x = x[:, :padding_length]
+        # padding to 1024 (padding_length)
         effective_length = x.shape[1]
-        padding = torch.randint(0, self.graph.dim, (x.shape[0], 1024 - effective_length), device=self.device)
+        padding = torch.randint(0, self.graph.dim, (x.shape[0], padding_length - effective_length), device=self.device)
         x = torch.cat([x, padding], dim=1)
         # 2. noising
-        sigma, dsigma = self.noise.forward(torch.tensor(noise_level))
+        sigma, dsigma = self.noise.forward(torch.tensor(self.purify_noise_level))
         sigma_embed = torch.tensor([[sigma]] * x.shape[0], device=self.device)
         x_t = self.graph.sample_transition(x, sigma_embed)
         # 3. denoising
-        x = self.sample(x_t, start_t=noise_level, total_steps=total_steps, decode=False, *args, **kwargs)
+        x = self.sample(x_t, start_t=self.purify_noise_level, total_steps=total_steps, decode=False, *args, **kwargs)
         text_samples = self.tokenizer.batch_decode(x[:, :effective_length])
         return text_samples
 

@@ -8,14 +8,14 @@ from typing import Tuple
 class BaseModel(nn.Module):
     def __init__(
         self,
-        model: PreTrainedModel,
-        tokenizer: PreTrainedTokenizer,
-        conv: Conversation,
+        model: PreTrainedModel = None,
+        tokenizer: PreTrainedTokenizer = None,
+        conv: Conversation = None,
         generation_max_length: int = 300,
         device=torch.device("cuda"),
     ):
         super(BaseModel, self).__init__()
-        self.model = model.to(device)
+        self.model = model
         self.tokenizer = tokenizer
         self.conv = conv
         self.eval().requires_grad_(False).to(device)
@@ -92,7 +92,7 @@ class BaseModel(nn.Module):
             print("actual input is: \n", self.tokenizer.decode(input_ids), "\n" * 5)
         outputs = self.model.generate(
             input_ids.unsqueeze(0),  # 1, L
-            max_length=self.generation_max_length if max_length is None else max_length,
+            max_new_tokens=self.generation_max_length if max_length is None else max_length,
             do_sample=False,
             temperature=None,
             top_p=None,
@@ -102,6 +102,9 @@ class BaseModel(nn.Module):
         ids = outputs.sequences.squeeze()
         logits = torch.cat(outputs.logits, dim=0)
         answer = self.tokenizer.decode(ids[input_ids.numel() :])
+        if verbose:
+            print(f"answer is: {answer}")
+            print("\n" * 5, "***" * 10)
         # llama3等模型的logits实际上已经被shift过了。llama2和vicuna没有shift，因此要手动shift
         logits = logits if logits.shape[0] == (ids.numel() - input_ids.numel()) else logits[input_ids.numel() :]
         return answer if not return_logits else (answer, logits)

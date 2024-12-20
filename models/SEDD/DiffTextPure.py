@@ -1,5 +1,5 @@
 import torch
-from typing import Tuple, Callable
+from typing import Tuple, Callable, List, Union
 from torch import Tensor
 from transformers import GPT2TokenizerFast
 from scipy.special import comb
@@ -19,7 +19,15 @@ def binomial(n: int, m: int) -> int:
 
 class DiffTextPure(BaseModel):
     def __init__(
-        self, model: BaseModel, sampler: BaseSampler, *args, verbose: bool = False, purify_batch_size=4, **kwargs
+        self,
+        model: BaseModel,
+        sampler: BaseSampler,
+        *args,
+        verbose: bool = False,
+        purify_batch_size: int = 4,
+        padding_length: int = 1024,  # Ad hoc. Would be removed after scaling diffusion language models.
+        purify_steps: int = 160,
+        **kwargs,
     ):
         super(DiffTextPure, self).__init__(model.model, model.tokenizer, model.conv, *args, **kwargs)
         self.to_protect_model = model
@@ -28,13 +36,22 @@ class DiffTextPure(BaseModel):
         # use to_protect_model's function
         self.get_prompt = self.to_protect_model.get_prompt
         self.purify_batch_size = purify_batch_size
+        self.purify_steps = purify_steps
+        self.padding_length = padding_length
+        # When batchly purify inputs, we need to pad the short one by space " ".
+        self.batch_pad_token = self.tokenizer(" ", add_special_tokens=False).input_ids[0]
 
-    def generate(self, question: str, *args, **kwargs) -> str or Tuple[str, Tensor]:
-        purified_question = self.sampler([question])[0]
+    def generate(
+        self, question: Union[str, List[str]], *args, return_purified_result: bool = False, **kwargs
+    ) -> Union[Tuple[str], Tuple[str, List[str]]]:
+        question = [question] if isinstance(question, str) else question
+        purified_question = self.sampler(question, total_steps=self.purify_steps, padding_length=self.padding_length)
         if self.verbose:
             print("original question: ", question)
             print("purified question: ", purified_question)
-        return self.to_protect_model.generate(purified_question, *args, **kwargs)
+        answer = [self.to_protect_model.generate(q, *args, **kwargs) for q in purified_question]
+        answer = answer[0] if len(answer) == 1 else answer
+        return (answer, purified_question) if return_purified_result else answer
 
     def generate_by_input_ids(self, input_ids: Tensor, *args, **kwargs) -> Tensor:
         """
@@ -49,7 +66,9 @@ class DiffTextPure(BaseModel):
         parts = decoded_text.split("\n### Human:")
         last_question = parts[-1].split("\n### Assistant:")[0].strip()
         # Step 2. DiffPure
-        purified_question = self.sampler([last_question])[0]
+        purified_question = self.sampler(
+            [last_question], total_steps=self.purify_steps, padding_length=self.padding_length
+        )[0]
         # Step 3. Concatenate back
         purified_text = "\n### Human:".join(parts[:-1]) + "\n### Human:" + purified_question + "\n### Assistant:"
         purified_ids = torch.tensor(
@@ -77,7 +96,11 @@ class DiffTextPure(BaseModel):
         purified_questions = [
             q
             for i in range(0, len(questions), self.purify_batch_size)
-            for q in self.sampler(questions[i : i + self.purify_batch_size])
+            for q in self.sampler(
+                questions[i : i + self.purify_batch_size],
+                total_steps=self.purify_steps,
+                padding_length=self.padding_length,
+            )
         ]
         purified_ids = self.tokenizer.batch_encode_plus(purified_questions, add_special_tokens=False).input_ids  # List
         # ------------------------------------------------------------------------------------------
@@ -95,7 +118,7 @@ class DiffTextPure(BaseModel):
         purified_ids = [ids[: end_indices[i] - begin_indices[i]] for i, ids in enumerate(purified_ids)]
         # Padding
         purified_ids = [
-            ids + (end_indices[i] - begin_indices[i] - len(ids)) * [self.tokenizer.pad_token_id]
+            ids + (end_indices[i] - begin_indices[i] - len(ids)) * [self.batch_pad_token]
             for i, ids in enumerate(purified_ids)
         ]
         # ------------------------------------------------------------------------------------------
@@ -110,23 +133,42 @@ class DiffTextPure(BaseModel):
         ids = torch.tensor(ids, device=self.device)
         return self.to_protect_model.forward(ids, *args, **kwargs)
 
+    # Below functions are for certified robustness
+    @staticmethod
+    def get_pA_given_n_and_nA(n: int = 10000, nA: int = 10000, alpha: float = 0.01):
+        return proportion_confint(nA, n, alpha=2 * alpha, method="beta")[0]  # single side Clopper-Pearson
+
 
 class DiffTextPureAbsorb(DiffTextPure):
-    def __init__(self, model: BaseModel, *args, **kwargs):
+    def __init__(self, model: BaseModel, *args, purify_noise_level: float = 0.25, **kwargs):
         transformer = SEDD.from_pretrained("louaaron/sedd-small")
         tokenizer = GPT2TokenizerFast.from_pretrained("gpt2")
         tokenizer.pad_token = tokenizer.eos_token
-        sampler = EulerSEDDSampler(transformer, tokenizer, LogLinearNoise(), Absorbing(50257))
+        sampler = EulerSEDDSampler(transformer, tokenizer, LogLinearNoise(), Absorbing(50257), purify_noise_level)
         super(DiffTextPureAbsorb, self).__init__(model, sampler, *args, **kwargs)
+        self.purify_noise_level = purify_noise_level
+
+    def certify_given_pA(self, pA: float, dim: int = None) -> int:
+        # TODO: finish this function
+        dim = dim or self.sampler.graph.dim
+        assert 0 <= pA <= 1
+        beta, beta_bar = self.compute_beta_given_t(noise_level_t=self.purify_noise_level)
+        for l0_diff in range(1, 1024):
+            p_adv = self.compute_difftextpure_absorb_min_adv_output(pA, beta, l0_diff, dim)
+            print(l0_diff, p_adv)
+            # if p_adv < 0.5:
+            #     return l0_diff - 1
+        return 1023
 
 
 class DiffTextPureUniform(DiffTextPure):
-    def __init__(self, model: BaseModel, *args, **kwargs):
+    def __init__(self, model: BaseModel, *args, purify_noise_level: float = 0.25, **kwargs):
         transformer = SEDD.from_pretrained("./resources/checkpoints/SEDD/uniform_small/huanran_repaired/")
         tokenizer = GPT2TokenizerFast.from_pretrained("gpt2")
         tokenizer.pad_token = tokenizer.eos_token
-        sampler = EulerSEDDSampler(transformer, tokenizer, LogLinearNoise(), Uniform(50257))
+        sampler = EulerSEDDSampler(transformer, tokenizer, LogLinearNoise(), Uniform(50257), purify_noise_level)
         super(DiffTextPureUniform, self).__init__(model, sampler, *args, **kwargs)
+        self.purify_noise_level = purify_noise_level
 
     @staticmethod
     def compute_difftextpure_uniform_min_adv_output_weak(pA: float, beta: float, d: int) -> float:
@@ -158,15 +200,7 @@ class DiffTextPureUniform(DiffTextPure):
         return p_adv
 
     @staticmethod
-    def compute_difftextpure_uniform_min_adv_output(pA: float, beta: float, d: int, V: int = 30000) -> float:
-        """
-
-        :param pA: lower confidence bound
-        :param beta: the word that would change to **a specific word** at time t
-        :param d: adv suffix length
-        :param V: vocabulary size
-        :return:
-        """
+    def compute_volume_and_ratio(beta: float, d: int, V: int = 30000):
         beta_bar = 1 - (V - 1) * beta  # 不变的概率
         ratio, volume = [], []
         for i in range(d + 1):  # normal suffix. 0-d
@@ -180,9 +214,31 @@ class DiffTextPureUniform(DiffTextPure):
                     cur_adv_prob = beta**j * beta_bar ** (d - j)
                     ratio.append(cur_adv_prob / cur_ori_prob)
                     volume.append(cur_ori_prob * num)
+                    print(i, j)
         sorted_pairs = sorted(zip(volume, ratio), key=lambda pair: pair[1])
         volume = [i[0] for i in sorted_pairs]
         ratio = [i[1] for i in sorted_pairs]
+        return volume, ratio
+
+    def compute_difftextpure_uniform_min_adv_output(self, pA: float, beta: float, d: int, V: int = 30000) -> float:
+        """
+
+        :param pA: lower confidence bound
+        :param beta: the word that would change to **a specific word** at time t
+        :param d: adv suffix length
+        :param V: vocabulary size
+        :return:
+        """
+        # Step 1. Compute ratio and volume
+        volume, ratio = self.compute_volume_and_ratio(beta, d, V)
+        measure_on_adv = [v * r for v, r in zip(volume, ratio)]
+        # print(volume)
+        # print(measure_on_adv)
+        # print(ratio)
+        import pdb
+
+        pdb.set_trace()
+        # Step 2. Solving Fractal Knapsack
         all_p_ori = 0
         p_adv = 0
         for i, cur_volume in enumerate(volume):
@@ -195,17 +251,22 @@ class DiffTextPureUniform(DiffTextPure):
                 return p_adv
         return p_adv
 
-    def compute_beta_given_t(self, noise_level_t: float) -> float:
+    def compute_beta_given_t(self, noise_level_t: float, dim: int = None) -> Tuple[float, float]:
         """
 
+        :param dim: vocabulary dim
         :param noise_level_t: diffusion time.
         :return:
         """
         sigma_bar_t, dsigma = self.sampler.noise.forward(torch.tensor(noise_level_t))
-        V = self.sampler.graph.dim
+        V = dim or self.sampler.graph.dim
         exp_sigma_bar_t = torch.exp(sigma_bar_t)
         beta = (exp_sigma_bar_t - 1) / (V * exp_sigma_bar_t)
-        return beta.item()
+        beta_bar = beta + torch.exp(-sigma_bar_t)
+        beta, beta_bar = beta.item(), beta_bar.item()
+        total = beta * (V - 1) + beta_bar
+        assert abs(total - 1) < 1e-5, f"numerical stability check not passed. sum of prob: {total}"
+        return beta, beta_bar
 
     def get_pA(self, text: str, judge: Callable, n: int = 10000, alpha: float = 0.01):
         result = 0
@@ -213,17 +274,19 @@ class DiffTextPureUniform(DiffTextPure):
             answer = self.generate(text)
             result += judge(answer)
         upper_bound = result / n  # Just for reference
-        pA = proportion_confint(result, n, alpha=2 * alpha, method="beta")[0]  # single side Clopper-Pearson
+        pA = self.get_pA_given_n_and_nA(n, result, alpha)
         return pA
 
-    def certify_given_pA(self, pA: float) -> int:
+    def certify_given_pA(self, pA: float, dim: int = None) -> int:
+        dim = dim or self.sampler.graph.dim
         assert 0 <= pA <= 1
-        beta = self.compute_beta_given_t(noise_level_t=0.25)  # Attention! 这里需要和实际用的保持一致  # 问题：sigma_t是否选的使得t恰好就是概率？
-        for adv_suffix_length in range(1, 1024):
-            r = self.compute_difftextpure_uniform_min_adv_output(pA, beta, adv_suffix_length, self.sampler.graph.dim)
-            print(adv_suffix_length, r)
-            if r < 0.5:
-                return adv_suffix_length - 1
+        beta, beta_bar = self.compute_beta_given_t(noise_level_t=self.purify_noise_level)
+        # beta = (1 - beta_bar) / (dim - 1)
+        for l0_diff in range(1, 1024):
+            p_adv = self.compute_difftextpure_uniform_min_adv_output(pA, beta, l0_diff, dim)
+            print(l0_diff, p_adv)
+            # if p_adv < 0.5:
+            #     return l0_diff - 1
         return 1023
 
     def certify(self, text: str, judge: Callable, n: int = 10000) -> int:

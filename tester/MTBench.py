@@ -18,7 +18,7 @@ from fastchat.llm_judge.common import (
 from tqdm import tqdm
 
 
-__all__ = ["test_mt_bench"]
+__all__ = ["test_mt_bench", "load_questions"]
 
 
 def generate_mbtanswer(
