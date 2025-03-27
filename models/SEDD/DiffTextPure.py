@@ -39,17 +39,30 @@ class DiffTextPure(BaseModel):
         self.purify_steps = purify_steps
         self.padding_length = padding_length
         # When batchly purify inputs, we need to pad the short one by space " ".
-        self.batch_pad_token = self.tokenizer(" ", add_special_tokens=False).input_ids[0]
+        if self.tokenizer is not None:
+            self.batch_pad_token = self.tokenizer(" ", add_special_tokens=False).input_ids[0]
 
     def generate(
-        self, question: Union[str, List[str]], *args, return_purified_result: bool = False, **kwargs
+        self,
+        question: Union[str, List[str]],
+        *args,
+        prefix: Union[str, List[str]] = "",
+        suffix: Union[str, List[str]] = "",
+        return_purified_result: bool = False,
+        **kwargs,
     ) -> Union[Tuple[str], Tuple[str, List[str]]]:
-        question = [question] if isinstance(question, str) else question
+        if isinstance(question, str):
+            question = [question]
+        if isinstance(prefix, str):
+            prefix = [prefix] * len(question)
+        if isinstance(suffix, str):
+            suffix = [suffix] * len(question)
         purified_question = self.sampler(question, total_steps=self.purify_steps, padding_length=self.padding_length)
         if self.verbose:
             print("original question: ", question)
             print("purified question: ", purified_question)
-        answer = [self.to_protect_model.generate(q, *args, **kwargs) for q in purified_question]
+        inputs = [p + q + s for p, q, s in zip(prefix, purified_question, suffix)]
+        answer = [self.to_protect_model.generate(q, *args, **kwargs) for q in inputs]
         answer = answer[0] if len(answer) == 1 else answer
         return (answer, purified_question) if return_purified_result else answer
 
@@ -148,16 +161,20 @@ class DiffTextPureAbsorb(DiffTextPure):
         super(DiffTextPureAbsorb, self).__init__(model, sampler, *args, **kwargs)
         self.purify_noise_level = purify_noise_level
 
-    def certify_given_pA(self, pA: float, dim: int = None) -> int:
-        # TODO: finish this function
-        dim = dim or self.sampler.graph.dim
+    def compute_difftextpure_absorb_min_adv_output(self, pA: float, beta: float, d: int):
+        beta_to_the_d = beta**d
+        if pA < 1 - beta_to_the_d:
+            return 0
+        return pA - (1 - beta_to_the_d)
+
+    def certify_given_pA(self, pA: float, threshold: float = 4.6e-5, *args, **kwargs) -> int:
         assert 0 <= pA <= 1
-        beta, beta_bar = self.compute_beta_given_t(noise_level_t=self.purify_noise_level)
+        beta, beta_bar = self.purify_noise_level, 1 - self.purify_noise_level
         for l0_diff in range(1, 1024):
-            p_adv = self.compute_difftextpure_absorb_min_adv_output(pA, beta, l0_diff, dim)
-            print(l0_diff, p_adv)
-            # if p_adv < 0.5:
-            #     return l0_diff - 1
+            p_adv = self.compute_difftextpure_absorb_min_adv_output(pA, beta, l0_diff)
+            # print(l0_diff, p_adv)
+            if p_adv < threshold:
+                return l0_diff - 1
         return 1023
 
 
@@ -214,7 +231,7 @@ class DiffTextPureUniform(DiffTextPure):
                     cur_adv_prob = beta**j * beta_bar ** (d - j)
                     ratio.append(cur_adv_prob / cur_ori_prob)
                     volume.append(cur_ori_prob * num)
-                    print(i, j)
+                    # print(i, j)
         sorted_pairs = sorted(zip(volume, ratio), key=lambda pair: pair[1])
         volume = [i[0] for i in sorted_pairs]
         ratio = [i[1] for i in sorted_pairs]
@@ -232,12 +249,6 @@ class DiffTextPureUniform(DiffTextPure):
         # Step 1. Compute ratio and volume
         volume, ratio = self.compute_volume_and_ratio(beta, d, V)
         measure_on_adv = [v * r for v, r in zip(volume, ratio)]
-        # print(volume)
-        # print(measure_on_adv)
-        # print(ratio)
-        import pdb
-
-        pdb.set_trace()
         # Step 2. Solving Fractal Knapsack
         all_p_ori = 0
         p_adv = 0
@@ -277,16 +288,16 @@ class DiffTextPureUniform(DiffTextPure):
         pA = self.get_pA_given_n_and_nA(n, result, alpha)
         return pA
 
-    def certify_given_pA(self, pA: float, dim: int = None) -> int:
+    def certify_given_pA(self, pA: float, dim: int = None, threshold: float = 4.6e-5) -> int:
         dim = dim or self.sampler.graph.dim
         assert 0 <= pA <= 1
         beta, beta_bar = self.compute_beta_given_t(noise_level_t=self.purify_noise_level)
         # beta = (1 - beta_bar) / (dim - 1)
         for l0_diff in range(1, 1024):
             p_adv = self.compute_difftextpure_uniform_min_adv_output(pA, beta, l0_diff, dim)
-            print(l0_diff, p_adv)
-            # if p_adv < 0.5:
-            #     return l0_diff - 1
+            # print(l0_diff, p_adv)
+            if p_adv < threshold:
+                return l0_diff - 1
         return 1023
 
     def certify(self, text: str, judge: Callable, n: int = 10000) -> int:

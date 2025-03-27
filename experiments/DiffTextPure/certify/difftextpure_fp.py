@@ -38,16 +38,16 @@ args = parser.parse_args()
 n: int = 100000
 batch_size: int = 16
 padding: int = 32
-purify_noise_level: float = 0.9
+purify_noise_level: float = 0.25
 assert n // batch_size, (
     "n should be divisible by batch_size, " "if not, the result may not exactly use n. Please be aware."
 )
 
 
-raw_model = to_be_protected_models[args.model]()
+raw_model = to_be_protected_models[args.model](device=torch.device("cuda:1"))
 protected_model = defenses[args.defender](
     raw_model,
-    purify_steps=16,
+    purify_steps=160,
     generation_max_length=300,
     # purify_steps=800,
     padding_length=256,
@@ -70,9 +70,9 @@ for example_id, q in enumerate(all_questions):
         if len(cur_fail) > 0:  # 这个打印不对
             print(cur_fail)
         pbar.set_postfix_str(f"n {trial_id}, nA {nA}")
-        import pdb
-
-        pdb.set_trace()
+        # import pdb
+        #
+        # pdb.set_trace()
     # 这个才是对的，应该和下面的结果一样
     upper_bound = proportion_confint(nA, n, 0.01 * 2, method="beta")[1]
     # 这个也可以（考虑问题本身对称性）

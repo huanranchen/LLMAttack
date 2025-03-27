@@ -3,3 +3,4 @@
 """
 from .PrefixSuffixDefense import PromptATPrefix, ICD, SelfReminder
 from .DetectionDefense import PerplexityDetectorDefense
+from .SelfDiffTextPure import SelfDiffTextPureAbsorb, SelfDiffTextPureUniform

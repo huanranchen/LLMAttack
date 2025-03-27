@@ -8,6 +8,7 @@ from transformers import (
     GPTJForCausalLM,
     GPTNeoXForCausalLM,
     LlamaForCausalLM,
+    Qwen2ForCausalLM
 )
 from torch import nn
 from typing import List
@@ -17,7 +18,7 @@ from collections import Counter
 def get_embedding_matrix(model):
     if isinstance(model, GPTJForCausalLM) or isinstance(model, GPT2LMHeadModel):
         return model.transformer.wte.weight
-    elif isinstance(model, LlamaForCausalLM):
+    elif isinstance(model, (LlamaForCausalLM, Qwen2ForCausalLM)):
         return model.model.embed_tokens.weight
     elif isinstance(model, GPTNeoXForCausalLM):
         return model.base_model.embed_in.weight

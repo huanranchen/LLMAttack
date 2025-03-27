@@ -21,6 +21,8 @@ class BaseModel(nn.Module):
         self.eval().requires_grad_(False).to(device)
         self.device = device
         self.generation_max_length = generation_max_length
+        self.config = model.config
+        self.tie_weights = self.model.tie_weights
 
     def forward(self, *args, **kwargs):
         return self.model(*args, **kwargs)

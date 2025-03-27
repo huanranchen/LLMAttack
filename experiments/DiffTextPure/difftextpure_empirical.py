@@ -9,7 +9,7 @@ from data import get_adv_bench_behaviors_50
 
 """
 e.g.
-CUDA_VISIBLE_DEVICES=2 python difftextpure_all_exps.py --model=llama3 --defender=ppl --attacker=igcg --debug
+CUDA_VISIBLE_DEVICES=2 python difftextpure_empirical.py --model=llama3 --defender=ppl --attacker=igcg --debug
 """
 
 
